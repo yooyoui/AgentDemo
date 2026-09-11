@@ -12,6 +12,7 @@ class ResearchFactOutput(StrictOutput):
     value: str = Field(min_length=1, max_length=1200)
     confidence: Literal["公开来源", "用户提供", "待核实", "待补充"]
     source_url: HttpUrl | None = None
+    status: Literal["已核实", "用户提供", "待确认", "待补充"] | None = None
 
 
 class ResearchOutput(StrictOutput):
@@ -19,6 +20,8 @@ class ResearchOutput(StrictOutput):
     facts: list[ResearchFactOutput] = Field(alias="结构化档案")
     directions: list[str] = Field(alias="潜在信息化方向")
     missing: list[str] = Field(alias="待补充")
+    entity_conflict: bool = Field(default=False, alias="主体冲突")
+    conflict_notes: list[str] = Field(default_factory=list, alias="冲突说明")
 
 
 class RequirementsOutput(StrictOutput):

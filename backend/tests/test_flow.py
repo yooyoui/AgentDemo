@@ -66,7 +66,6 @@ class FlowTests(unittest.IsolatedAsyncioTestCase):
             "禁止承诺": ["报价需确认", "不得承诺额外服务"],
         }
         results = [
-            SimpleNamespace(data=research, latency_ms=1, attempts=1),
             SimpleNamespace(data=requirements, latency_ms=1, attempts=1),
             SimpleNamespace(data=solution, latency_ms=1, attempts=1),
             SimpleNamespace(data=script, latency_ms=1, attempts=1),
@@ -80,7 +79,22 @@ class FlowTests(unittest.IsolatedAsyncioTestCase):
         }
         with (
             patch("app.main.SessionLocal", test_session),
-            patch("app.main.public_research", new=AsyncMock(return_value=(research["结构化档案"], []))),
+            patch(
+                "app.main.generate_customer_research",
+                new=AsyncMock(return_value=(
+                    research,
+                    [],
+                    {
+                        "search_rounds": 1,
+                        "source_count": 0,
+                        "coverage_percent": 10,
+                        "critical_field_coverage_percent": 25,
+                        "entity_conflict": False,
+                        "conflict_notes": [],
+                    },
+                    {"latency_ms": 1, "attempts": 1, "calls": 1},
+                )),
+            ),
             patch("app.main.call_llm", new=AsyncMock(side_effect=results)),
         ):
             await execute_flow(task_id, payload)
@@ -96,6 +110,7 @@ class FlowTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(saved_task.status, "completed")
             self.assertEqual(saved_task.progress, 100)
             self.assertEqual(saved_task.error, "")
+            self.assertEqual(saved_task.output["research"]["search_rounds"], 1)
             self.assertIsNotNone(saved_script)
             self.assertFalse(saved_script.confirmed)
             self.assertEqual(

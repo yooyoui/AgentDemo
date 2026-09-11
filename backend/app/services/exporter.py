@@ -49,11 +49,32 @@ def export_docx(path: Path, customer_name: str, artifacts) -> None:
     doc.add_paragraph("本材料由智能体生成并经人工确认。具体能力、报价、工期与服务内容以正式文件为准。")
     for artifact in artifacts:
         doc.add_heading(SECTION_NAMES.get(artifact.type.value, artifact.title), level=1)
-        for depth, line in _lines(artifact.content):
-            if depth == 0 and not line.startswith("•"):
-                doc.add_heading(line, level=2)
-            else:
-                doc.add_paragraph(line, style="List Bullet" if line.startswith("•") else None)
+        if artifact.type.value == "research":
+            if artifact.content.get("客户"):
+                doc.add_paragraph(f"客户单位：{artifact.content['客户']}")
+            facts = artifact.content.get("结构化档案", [])
+            if facts:
+                table = doc.add_table(rows=1, cols=3)
+                table.style = "Table Grid"
+                for cell, value in zip(table.rows[0].cells, ("信息项", "内容", "状态")):
+                    cell.text = value
+                for fact in facts:
+                    cells = table.add_row().cells
+                    cells[0].text = str(fact.get("label", "信息项"))
+                    cells[1].text = str(fact.get("value", "待补充"))
+                    cells[2].text = str(fact.get("status") or fact.get("confidence") or "待核实")
+            for key in ("潜在信息化方向", "待补充"):
+                values = artifact.content.get(key, [])
+                if values:
+                    doc.add_heading(key, level=2)
+                    for value in values:
+                        doc.add_paragraph(str(value), style="List Bullet")
+        else:
+            for depth, line in _lines(artifact.content):
+                if depth == 0 and not line.startswith("•"):
+                    doc.add_heading(line, level=2)
+                else:
+                    doc.add_paragraph(line, style="List Bullet" if line.startswith("•") else None)
         if artifact.citations:
             doc.add_heading("引用来源", level=2)
             for citation in artifact.citations:
@@ -141,7 +162,7 @@ def export_pdf(path: Path, customer_name: str, artifacts) -> None:
             elements.append(p("结构化档案", h3))
             rows = [[p("信息项", label), p("内容", label), p("可信度", label)]]
             for fact in facts:
-                rows.append([p(fact.get("label", "信息项")), p(fact.get("value", "待补充")), p(fact.get("confidence", "待核实"), small)])
+                rows.append([p(fact.get("label", "信息项")), p(fact.get("value", "待补充")), p(fact.get("status") or fact.get("confidence", "待核实"), small)])
             table = Table(rows, colWidths=[31*mm, 111*mm, 28*mm], repeatRows=1)
             table.setStyle(TableStyle([
                 ("BACKGROUND", (0, 0), (-1, 0), colors["cyan_light"]),

@@ -25,7 +25,7 @@ flowchart LR
     A --> R[(Redis\n预留异步队列)]
     A --> O[(MinIO / 本地目录\n资料与导出文件)]
     A --> L[DeepSeek API]
-    A --> T[Tavily 公开检索]
+    A --> T[DeepSeek 原生联网搜索]
     A --> K[内部知识库检索]
     K --> D
 ```
@@ -54,7 +54,7 @@ flowchart LR
 | 前端 | Next.js 15、React 19、TypeScript、Lucide Icons |
 | 后端 | Python 3.12、FastAPI、SQLAlchemy、Pydantic |
 | 大模型 | DeepSeek OpenAI-compatible API，默认 `deepseek-v4-flash` |
-| 公开检索 | Tavily，可选 |
+| 公开检索 | DeepSeek Responses API 原生 Web Search |
 | 数据 | PostgreSQL 16 + pgvector；本地开发可使用 SQLite |
 | 基础设施 | Redis 7、MinIO、Docker Compose |
 | 文档处理 | pypdf、python-docx、python-pptx、openpyxl、ReportLab |
@@ -94,7 +94,7 @@ AgentDemo/
 - Node.js 22 LTS
 - pnpm 9.15.4（通过 Corepack 安装）
 - 可选：Docker Desktop / Docker Engine + Compose
-- 可选：DeepSeek API Key、Tavily API Key
+- 可选：DeepSeek API Key
 
 ## 快速启动：SQLite 演示模式
 
@@ -125,7 +125,7 @@ cp .env.example .env
 DATABASE_URL=sqlite:///./backend/data/visit_assistant.db
 ```
 
-保持 `LLM_API_KEY` 和 `TAVILY_API_KEY` 为空时，系统使用可复现的演示规则。
+保持 `LLM_API_KEY` 为空时，系统使用可复现的演示规则且不执行联网搜索。
 
 ### 2. 启动后端
 
@@ -183,7 +183,7 @@ docker compose up -d postgres redis minio
 
 再按前述命令启动后端和前端。Docker Compose 中的默认凭据仅用于本地开发，部署前必须替换。
 
-## 接入 DeepSeek 与公开检索
+## 接入 DeepSeek 与原生联网搜索
 
 在本地 `.env` 中填写配置，不要向仓库提交真实密钥：
 
@@ -191,11 +191,10 @@ docker compose up -d postgres redis minio
 LLM_API_KEY=你的_DeepSeek_API_Key
 LLM_BASE_URL=https://api.deepseek.com
 LLM_MODEL=deepseek-v4-flash
+LLM_SEARCH_MODEL=deepseek-v4-pro
 LLM_TIMEOUT_SECONDS=90
 LLM_MAX_TOKENS=4096
 LLM_MAX_RETRIES=2
-
-TAVILY_API_KEY=你的_Tavily_API_Key
 ```
 
 修改后重启后端。检查模型配置：
@@ -220,8 +219,11 @@ Invoke-RestMethod -Method Post http://127.0.0.1:8000/api/model/test
 | --- | --- | --- |
 | `GET` | `/api/health` | 服务、模型与公开检索状态 |
 | `POST` | `/api/model/test` | DeepSeek 连通性测试 |
+| `POST` | `/api/search` | DeepSeek 原生联网搜索 |
 | `GET/POST` | `/api/customers` | 查询或创建客户 |
+| `POST` | `/api/customers/{id}/research` | 异步生成或刷新客户摸底 |
 | `POST` | `/api/knowledge` | 上传并索引内部资料 |
+| `DELETE` | `/api/knowledge/{id}` | 删除单条知识库资料及对应上传文件 |
 | `GET/PUT` | `/api/prompts`、`/api/prompts/{task_type}` | 提示词管理 |
 | `POST` | `/api/customers/{id}/run-all` | 异步生成整套拜访材料 |
 | `GET` | `/api/tasks/{id}` | 查询生成进度和错误 |
@@ -230,6 +232,18 @@ Invoke-RestMethod -Method Post http://127.0.0.1:8000/api/model/test
 | `POST` | `/api/customers/{id}/export/{docx\|pdf}` | 导出确认后的材料 |
 
 知识库支持 `.pdf`、`.docx`、`.pptx`、`.xlsx`、`.txt` 和 `.md`，单文件默认不超过 15 MB。
+
+联网搜索示例：
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/search \
+  -H "Content-Type: application/json" \
+  -d '{"query":"重庆 制造业 数字化建设","max_results":5}'
+```
+
+该接口复用同一个 `LLM_API_KEY`，通过 DeepSeek Responses API 的服务端 `web_search` 工具检索公开网页。普通内容生成默认使用 `deepseek-v4-flash`，联网搜索使用 `LLM_SEARCH_MODEL` 指定的 `deepseek-v4-pro`；当前 Flash 响应可能不会实际执行联网工具。后端会强制检查真实 `web_search_call`，未执行时直接报错，不会把模型生成的建议或伪造链接当成搜索结果。
+
+客户摸底默认只执行一次综合联网查询，同时整理企业性质、行业、成立时间、注册资本、规模、主营业务、总部与分支、官网、数字化现状和近期项目。只有企业性质、企业规模、主营业务、官网缺失，或检测到同名主体冲突时，才会再执行一次合并补查；每次生成最多两轮业务搜索。仍无可靠来源的字段保留为“待补充”，不会根据注册资本或模型常识推算企业规模。
 
 ## 测试与构建
 
@@ -253,7 +267,7 @@ pnpm exec tsc --noEmit --incremental false
 pnpm build
 ```
 
-Pull Request 会通过 GitHub Actions 自动执行后端测试、前端类型检查和生产构建。CI 不使用真实 DeepSeek 或 Tavily Key。
+Pull Request 会通过 GitHub Actions 自动执行后端测试、前端类型检查和生产构建。CI 不使用真实 DeepSeek Key。
 
 ## 协作开发流程
 
@@ -276,7 +290,7 @@ Pull Request 会通过 GitHub Actions 自动执行后端测试、前端类型检
 
 - 当前所有访问者共享同一工作空间，没有用户级数据隔离。
 - `.env`、API Key、客户数据库、原始附件和导出成果禁止提交到 Git。
-- 大模型不能直接访问互联网；公开资料仅由配置的检索服务获取。
+- 只有客户摸底和显式调用 `/api/search` 时允许通过 DeepSeek 服务端搜索工具访问公开网页；其他生成步骤不会重复联网。
 - 能力推荐必须有内部资料依据；没有依据时明确返回暂无证据。
 - 不生成未经确认的产品能力、案例、报价、工期或服务承诺。
 - 上线公网或录入正式客户资料前，必须补充认证、权限、审计、密钥管理和下载地址过期机制。
@@ -284,7 +298,7 @@ Pull Request 会通过 GitHub Actions 自动执行后端测试、前端类型检
 ## 已知限制与路线
 
 - Redis 异步任务、MinIO 对象存储和 pgvector 向量检索尚未完整启用。
-- 公开摸底依赖 Tavily；未配置时仅展示用户输入和待核实信息。
+- 公开摸底依赖 DeepSeek 原生联网搜索；未配置模型 Key 时仅展示用户输入和待核实信息。
 - 当前使用单一共享空间，不区分客户经理、解决方案经理和管理员。
 - 暂不包含拜访后总结、CRM/OA 集成、招投标监控和行业资讯推送。
 - 后续优先补充登录权限、操作审计、正式向量检索、任务队列和真实案例评测。

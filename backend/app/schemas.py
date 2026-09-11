@@ -1,7 +1,7 @@
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, HttpUrl, field_validator
 
 from .models import ArtifactType
 
@@ -86,3 +86,30 @@ class ModelTestRead(BaseModel):
     model: str
     latency_ms: int | None = None
     error: str = ""
+
+
+class WebSearchRequest(BaseModel):
+    query: str = Field(min_length=2, max_length=500)
+    max_results: int = Field(default=5, ge=1, le=10)
+
+    @field_validator("query")
+    @classmethod
+    def validate_query(cls, value: str) -> str:
+        value = value.strip()
+        if len(value) < 2:
+            raise ValueError("搜索关键词至少需要 2 个字符")
+        return value
+
+
+class WebSearchItem(BaseModel):
+    title: str
+    url: HttpUrl
+    content: str
+    published_date: str | None = None
+
+
+class WebSearchRead(BaseModel):
+    provider: Literal["deepseek"] = "deepseek"
+    query: str
+    results: list[WebSearchItem]
+    searched_at: datetime

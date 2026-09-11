@@ -16,11 +16,11 @@ class Settings(BaseSettings):
     llm_api_key: str = ""
     llm_base_url: str = "https://api.deepseek.com"
     llm_model: str = "deepseek-v4-flash"
+    llm_search_model: str = "deepseek-v4-pro"
     llm_timeout_seconds: int = 90
     llm_max_tokens: int = 4096
     llm_max_retries: int = 2
     embedding_model: str = "text-embedding-3-small"
-    tavily_api_key: str = ""
     cors_origins: str = "http://localhost:3000,http://localhost:3001"
     model_config = SettingsConfigDict(env_file=PROJECT_ROOT / ".env", extra="ignore")
 

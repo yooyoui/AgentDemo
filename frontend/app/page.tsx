@@ -1,7 +1,7 @@
 "use client";
 
 import { ChangeEvent, useEffect, useMemo, useState } from "react";
-import { BookOpen, Check, ChevronRight, CircleAlert, FileDown, FileText, LayoutDashboard, LoaderCircle, MessageSquareText, Plus, RefreshCw, Search, Settings2, Sparkles, Upload, Wifi, WifiOff } from "lucide-react";
+import { BookOpen, Check, ChevronRight, CircleAlert, FileDown, FileText, LayoutDashboard, LoaderCircle, MessageSquareText, Plus, RefreshCw, Search, Settings2, Sparkles, Trash2, Upload, Wifi, WifiOff } from "lucide-react";
 import { API_URL, api, Artifact, Customer, Health, Knowledge, Prompt } from "@/lib/api";
 
 type View = "workspace" | "knowledge" | "prompts";
@@ -13,7 +13,8 @@ function JsonView({ value, level = 0 }: { value: unknown; level?: number }) {
   if (value && typeof value === "object") {
     const record = value as Record<string, unknown>;
     if (typeof record.label === "string" && "value" in record) {
-      return <div className="fact-row"><div><h5>{record.label}</h5><p>{String(record.value ?? "待补充")}</p></div>{record.confidence != null && <span className="confidence-badge">{String(record.confidence)}</span>}</div>;
+      const sourceUrl = typeof record.source_url === "string" ? record.source_url : "";
+      return <div className="fact-row"><div><h5>{record.label}</h5><p>{String(record.value ?? "待补充")}</p></div><div className="fact-meta">{(record.status != null || record.confidence != null) && <span className="confidence-badge">{String(record.status ?? record.confidence)}</span>}{sourceUrl && <a href={sourceUrl} target="_blank" rel="noreferrer">查看来源</a>}</div></div>;
     }
     return <div className={level ? "nested-grid" : "result-grid"}>{Object.entries(record).map(([key, item]) => <section className="result-section" key={key}><h4>{key}</h4><JsonView value={item} level={level + 1} /></section>)}</div>;
   }
@@ -101,6 +102,26 @@ export default function Home() {
     } catch (e) { setBusy(false); setError(e instanceof Error ? e.message : "生成失败"); }
   };
 
+  const runResearch = async () => {
+    if (!selectedId) return setError("请先新建或选择客户");
+    const existing = artifacts.find((item) => item.type === "research");
+    if (existing && !window.confirm("重新联网摸底会创建新版本，并将客户摸底恢复为待确认。是否继续？")) return;
+    setBusy(true); setError(""); setProgress(2);
+    try {
+      const task = await api.runResearch(selectedId);
+      const timer = window.setInterval(async () => {
+        try {
+          const latest = await api.task(task.id); setProgress(latest.progress);
+          if (latest.status === "completed" || latest.status === "failed") {
+            window.clearInterval(timer); setBusy(false);
+            if (latest.status === "failed") setError(latest.error || "客户摸底生成失败");
+            else setArtifacts(await api.artifacts(selectedId));
+          }
+        } catch { window.clearInterval(timer); setBusy(false); setError("无法获取任务进度"); }
+      }, 900);
+    } catch (e) { setBusy(false); setError(e instanceof Error ? e.message : "客户摸底生成失败"); }
+  };
+
   const confirm = async (artifact: Artifact) => {
     try { const updated = await api.confirmArtifact(artifact.id); setArtifacts(artifacts.map((x) => x.id === updated.id ? updated : x)); } catch (e) { setError(e instanceof Error ? e.message : "确认失败"); }
   };
@@ -119,6 +140,19 @@ export default function Home() {
     const form = new FormData(); form.append("file", file); form.append("category", "产品"); form.append("version", "1.0");
     setBusy(true); setError("");
     try { const doc = await api.uploadKnowledge(form); setKnowledge([doc, ...knowledge]); } catch (e) { setError(e instanceof Error ? e.message : "上传失败"); } finally { setBusy(false); event.target.value = ""; }
+  };
+
+  const deleteKnowledge = async (document: Knowledge) => {
+    if (!window.confirm(`确认删除“${document.filename}”吗？删除后该资料将不再参与后续能力匹配。`)) return;
+    setBusy(true); setError("");
+    try {
+      await api.deleteKnowledge(document.id);
+      setKnowledge((items) => items.filter((item) => item.id !== document.id));
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "删除知识库资料失败");
+    } finally {
+      setBusy(false);
+    }
   };
 
   const exportFile = async (format: "docx" | "pdf") => {
@@ -141,7 +175,7 @@ export default function Home() {
     </aside>
 
     <section className="main-area">
-      <header className="topbar"><div><p className="eyebrow">{view === "workspace" ? "VISIT PREPARATION" : view === "knowledge" ? "KNOWLEDGE CENTER" : "PROMPT STUDIO"}</p><h1>{view === "workspace" ? "拜访准备工作台" : view === "knowledge" ? "移动能力知识库" : "提示词管理"}</h1></div><div className="connection">{health ? <Wifi size={16} /> : <WifiOff size={16} />} {health ? <>{health.model_status === "configured" ? health.model : "大模型演示模式"} · {health.research === "tavily" ? "公开检索已启用" : "公开检索演示模式"}</> : "等待服务"}</div></header>
+      <header className="topbar"><div><p className="eyebrow">{view === "workspace" ? "VISIT PREPARATION" : view === "knowledge" ? "KNOWLEDGE CENTER" : "PROMPT STUDIO"}</p><h1>{view === "workspace" ? "拜访准备工作台" : view === "knowledge" ? "移动能力知识库" : "提示词管理"}</h1></div><div className="connection">{health ? <Wifi size={16} /> : <WifiOff size={16} />} {health ? <>{health.model_status === "configured" ? health.model : "大模型演示模式"} · {health.research === "deepseek-web" ? `公开检索 ${health.research_model || "已启用"}` : "公开检索演示模式"}</> : "等待服务"}</div></header>
 
       {error && <div className="error-banner"><CircleAlert size={18} /><span>{error}</span><button onClick={() => setError("")}>关闭</button></div>}
 
@@ -154,7 +188,7 @@ export default function Home() {
           <div className="panel-head compact"><div><span className="section-index">02</span><h2>输入沟通背景</h2></div></div>
           <label>前期沟通记录<textarea value={communication} onChange={(e) => setCommunication(e.target.value)} rows={8} placeholder="粘贴聊天记录、会议纪要或客户描述……" /></label>
           <div className="form-grid"><label>拜访类型<select value={visitType} onChange={(e) => setVisitType(e.target.value)}><option>首次拜访</option><option>方案沟通</option><option>高层拜访</option><option>项目跟进</option></select></label><label>客户角色<select value={customerRole} onChange={(e) => setCustomerRole(e.target.value)}><option>业务负责人</option><option>信息化负责人</option><option>单位领导</option><option>采购负责人</option></select></label><label className="wide">表达风格<select value={style} onChange={(e) => setStyle(e.target.value)}><option>专业务实</option><option>简洁直接</option><option>顾问式沟通</option></select></label></div>
-          <button className="primary" onClick={runAll} disabled={busy || !selectedId || allConfirmed}>{busy ? <><LoaderCircle className="spin" size={18} />正在生成 {progress}%</> : allConfirmed ? <><Check size={18} />材料已确认，请在右侧导出</> : artifacts.length > 0 ? <><RefreshCw size={18} />重新生成全部材料</> : <><Sparkles size={18} />一键生成拜访材料</>}</button>
+          <div className="generation-actions"><button className="primary" onClick={runAll} disabled={busy || !selectedId || allConfirmed}>{busy ? <><LoaderCircle className="spin" size={18} />正在生成 {progress}%</> : allConfirmed ? <><Check size={18} />材料已确认，请在右侧导出</> : artifacts.length > 0 ? <><RefreshCw size={18} />重新生成全部材料</> : <><Sparkles size={18} />一键生成拜访材料</>}</button><button className="secondary research-only" onClick={runResearch} disabled={busy || !selectedId}><Search size={16} />仅生成客户摸底</button></div>
           {artifacts.length > 0 && !allConfirmed && <p className="regenerate-note">重新生成会创建新版本，并将全部材料恢复为待确认。</p>}
           {busy && <div className="progress"><span style={{ width: `${progress}%` }} /></div>}
         </section>
@@ -168,7 +202,7 @@ export default function Home() {
         </section>
       </div>}
 
-      {view === "knowledge" && <div className="single-view"><section className="library-summary"><div><p className="eyebrow">INTERNAL EVIDENCE</p><h2>上传公司正式资料</h2><p>只有知识库中有明确依据的产品、服务和案例，才会进入能力匹配结果。</p></div><label className="upload-button"><Upload size={18} />上传资料<input type="file" accept=".pdf,.docx,.pptx,.xlsx,.txt,.md" onChange={upload} hidden /></label></section><div className="document-grid">{knowledge.map((doc) => <article key={doc.id}><div className="doc-icon"><FileText size={22} /></div><div><h3>{doc.filename}</h3><p>{doc.category} · V{doc.version}</p></div><span>{doc.status === "ready" ? "可检索" : doc.status}</span></article>)}{!knowledge.length && <div className="library-empty"><BookOpen size={28} /><p>知识库尚为空，请上传移动产品、行业方案或案例资料。</p></div>}</div></div>}
+      {view === "knowledge" && <div className="single-view"><section className="library-summary"><div><p className="eyebrow">INTERNAL EVIDENCE</p><h2>上传公司正式资料</h2><p>只有知识库中有明确依据的产品、服务和案例，才会进入能力匹配结果。</p></div><label className="upload-button"><Upload size={18} />上传资料<input type="file" accept=".pdf,.docx,.pptx,.xlsx,.txt,.md" onChange={upload} hidden /></label></section><div className="document-grid">{knowledge.map((doc) => <article key={doc.id}><div className="doc-icon"><FileText size={22} /></div><div><h3>{doc.filename}</h3><p>{doc.category} · V{doc.version}</p></div><div className="doc-actions"><span>{doc.status === "ready" ? "可检索" : doc.status}</span><button type="button" onClick={() => void deleteKnowledge(doc)} disabled={busy} aria-label={`删除 ${doc.filename}`} title="删除资料"><Trash2 size={15} /></button></div></article>)}{!knowledge.length && <div className="library-empty"><BookOpen size={28} /><p>知识库尚为空，请上传移动产品、行业方案或案例资料。</p></div>}</div></div>}
 
       {view === "prompts" && <div className="single-view"><div className="prompt-intro"><p>提示词按任务独立管理。修改后将应用于后续生成，不会自动改写已有材料。</p></div><div className="prompt-list">{prompts.map((prompt) => <article key={prompt.id}><header><div><MessageSquareText size={19} /><h3>{stepLabels[prompt.task_type] || prompt.name}</h3></div><span>V{prompt.version} · {prompt.enabled ? "启用" : "停用"}</span></header><textarea value={prompt.content} onChange={(e) => setPrompts(prompts.map((p) => p.id === prompt.id ? { ...p, content: e.target.value } : p))} rows={4} /><button className="secondary" onClick={async () => { try { const updated = await api.updatePrompt(prompt.task_type, { name: prompt.name, content: prompt.content, version: prompt.version, enabled: prompt.enabled }); setPrompts(prompts.map((p) => p.id === updated.id ? updated : p)); } catch (e) { setError(e instanceof Error ? e.message : "保存失败"); } }}><RefreshCw size={15} />保存当前版本</button></article>)}</div></div>}
     </section>
