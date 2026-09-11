@@ -6,13 +6,13 @@
 
 ## 功能概览
 
-- 客户摸底：整理客户基础信息和公开资料，外部事实保留来源与采集时间。
+- 客户摸底：使用一轮综合联网搜索整理十项固定档案字段；关键字段缺失或主体冲突时最多再执行一轮合并补查，外部事实保留来源与采集时间。
 - 需求拆解：从沟通记录中提取显性需求、隐性痛点、建设期望、关注事项和待确认问题。
-- 能力匹配：仅基于内部知识库匹配产品、云业务、专线、行业方案、服务能力和案例。
+- 能力匹配：仅基于内部知识库匹配产品、云业务、专线、行业方案、服务能力和案例；知识库支持上传、列表和单条删除。
 - 初步方案：生成客户现状、建设目标、方案组合、建设思路、预期价值与风险边界。
-- 拜访话术：覆盖开场破冰、背景确认、需求深挖、方案讲解、异议处理和收尾跟进。
+- 拜访话术：覆盖开场破冰、背景确认、需求深挖、方案讲解、异议处理和收尾跟进，并自动保留初步方案的原始风险边界。
 - 人工审核：五项内容逐项确认，编辑后自动恢复为待确认状态。
-- 成果导出：全部确认后导出可编辑 Word 和排版后的 PDF。
+- 成果导出：全部确认后导出可编辑 Word 和排版后的 PDF，页面与导出文件共用结构化数据，不显示 `label`、`value` 等内部 JSON 字段名。
 - 提示词管理：按任务维护模板、版本和启停状态，启用版本用于后续生成。
 
 ## 系统架构
@@ -66,14 +66,17 @@ AgentDemo/
 ├─ backend/
 │  ├─ app/
 │  │  ├─ main.py              # API 与五步生成编排
+│  │  ├─ config.py            # 环境变量与运行配置
+│  │  ├─ database.py          # 数据库连接与会话
 │  │  ├─ models.py            # 数据模型
 │  │  ├─ schemas.py           # API 输入输出结构
 │  │  └─ services/
-│  │     ├─ agent.py          # DeepSeek、检索与安全处理
+│  │     ├─ agent.py          # 大模型调用、知识检索与安全处理
+│  │     ├─ search.py         # DeepSeek 原生联网搜索
 │  │     ├─ outputs.py        # 五类模型输出校验
 │  │     ├─ documents.py      # PDF/Word/PPT/Excel 文本提取
 │  │     └─ exporter.py       # Word/PDF 导出
-│  ├─ tests/
+│  ├─ tests/                  # 生成、搜索、导出与知识库接口测试
 │  └─ requirements.txt
 ├─ frontend/
 │  ├─ app/                    # 页面与样式
@@ -106,6 +109,8 @@ AgentDemo/
 git clone https://github.com/yooyoui/AgentDemo.git
 cd AgentDemo
 ```
+
+仓库为私有时，执行克隆前需要由仓库所有者邀请为协作者，并在 GitHub CLI、系统凭据管理器或 SSH 中完成认证。
 
 Windows PowerShell：
 
@@ -213,6 +218,8 @@ Invoke-RestMethod -Method Post http://127.0.0.1:8000/api/model/test
 
 模型调用使用 JSON Output、结构校验、非思考模式、超时和重试。配置了 Key 后如果调用失败，生成任务会明确失败，不会静默降级为演示内容。
 
+`/api/health` 中 `model` 表示普通生成模型，`research_model` 表示联网搜索模型；配置成功时 `research` 应为 `deepseek-web`。API Key 只由后端读取，不会通过健康检查、任务结果或前端返回。
+
 ## 主要 API
 
 | 方法 | 路径 | 用途 |
@@ -221,17 +228,22 @@ Invoke-RestMethod -Method Post http://127.0.0.1:8000/api/model/test
 | `POST` | `/api/model/test` | DeepSeek 连通性测试 |
 | `POST` | `/api/search` | DeepSeek 原生联网搜索 |
 | `GET/POST` | `/api/customers` | 查询或创建客户 |
+| `GET` | `/api/customers/{id}` | 查询单个客户 |
 | `POST` | `/api/customers/{id}/research` | 异步生成或刷新客户摸底 |
+| `GET` | `/api/knowledge` | 查询知识库资料 |
 | `POST` | `/api/knowledge` | 上传并索引内部资料 |
 | `DELETE` | `/api/knowledge/{id}` | 删除单条知识库资料及对应上传文件 |
-| `GET/PUT` | `/api/prompts`、`/api/prompts/{task_type}` | 提示词管理 |
+| `GET` | `/api/prompts` | 查询提示词模板 |
+| `PUT` | `/api/prompts/{task_type}` | 新建或更新指定任务的提示词模板 |
 | `POST` | `/api/customers/{id}/run-all` | 异步生成整套拜访材料 |
 | `GET` | `/api/tasks/{id}` | 查询生成进度和错误 |
 | `GET/PUT` | `/api/artifacts`、`/api/artifacts/{id}` | 查询和修改草稿 |
 | `POST` | `/api/artifacts/{id}/confirm` | 人工确认单项材料 |
 | `POST` | `/api/customers/{id}/export/{docx\|pdf}` | 导出确认后的材料 |
 
-知识库支持 `.pdf`、`.docx`、`.pptx`、`.xlsx`、`.txt` 和 `.md`，单文件默认不超过 15 MB。
+知识库支持 `.pdf`、`.docx`、`.pptx`、`.xlsx`、`.txt` 和 `.md`，单文件默认不超过 15 MB。删除前页面会二次确认；删除成功后，数据库记录和知识库存储目录中的对应文件会一并移除，该资料不再参与后续能力匹配。后端会拒绝删除知识库存储目录之外的路径。
+
+删除知识库资料不会自动重写已经生成的历史草稿；历史成果中保存的引用快照仍可能保留。如需彻底清理相关客户内容，应同时人工检查并处理已有草稿和导出文件。
 
 联网搜索示例：
 
@@ -250,14 +262,21 @@ curl -X POST http://127.0.0.1:8000/api/search \
 Windows 后端测试：
 
 ```powershell
-backend\.venv\Scripts\python.exe -m unittest discover -s backend/tests -v
+Push-Location backend
+.\.venv\Scripts\python.exe -m pytest tests -q
+.\.venv\Scripts\python.exe -m unittest discover -s tests -v
+Pop-Location
 ```
 
 macOS / Linux 后端测试：
 
 ```bash
-backend/.venv/bin/python -m unittest discover -s backend/tests -v
+cd backend
+.venv/bin/python -m pytest tests -q
+.venv/bin/python -m unittest discover -s tests -v
 ```
+
+pytest 命令适合本地快速验证；GitHub Actions 使用 `unittest discover` 运行同一批兼容测试。
 
 前端检查：
 
@@ -308,6 +327,12 @@ Pull Request 会通过 GitHub Actions 自动执行后端测试、前端类型检
 ### 页面显示“大模型演示模式”
 
 确认 `.env` 中已填写 `LLM_API_KEY`，保存后重启后端，再调用 `/api/model/test`。
+
+### 客户摸底仍显示“待补充”
+
+先检查 `/api/health` 是否返回 `research: deepseek-web`，并确认 `LLM_SEARCH_MODEL=deepseek-v4-pro`。创建客户时尽量填写完整企业名称、地区和行业以减少同名主体冲突。系统最多执行两轮综合搜索；两轮后仍缺少可验证来源的字段会按设计保留为“待补充”，不会由模型猜测。
+
+任务失败并提示联网搜索格式或未执行搜索时，调用 `/api/search` 做独立排查；后端只接受包含真实 `web_search_call` 且 URL 合法的 DeepSeek 返回结果。
 
 ### 前端无法访问后端
 
