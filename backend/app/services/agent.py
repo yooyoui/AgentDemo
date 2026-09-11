@@ -93,6 +93,43 @@ def retrieve_knowledge(documents: list[KnowledgeDocument], query: str, limit: in
     ]
 
 
+def resolve_capability_references(matches: list[dict], refs: list[dict]) -> tuple[list[dict], list[dict]]:
+    """Validate quotes against every retrieved excerpt belonging to a document."""
+    refs_by_document: dict[str, list[dict]] = {}
+    for ref in refs:
+        document_id = str(ref.get("document_id") or "")
+        if document_id:
+            refs_by_document.setdefault(document_id, []).append(ref)
+
+    visible_matches: list[dict] = []
+    selected_refs: list[dict] = []
+    for raw_match in matches:
+        match = dict(raw_match)
+        document_id = str(match.pop("document_id", "") or "")
+        candidates = refs_by_document.get(document_id, [])
+        if not candidates:
+            raise LLMCallError("能力匹配引用了不存在的内部资料")
+
+        quote = match.get("引用", "")
+        reference = next(
+            (
+                candidate
+                for candidate in candidates
+                if isinstance(candidate.get("excerpt"), str)
+                and isinstance(quote, str)
+                and quote
+                and quote in candidate["excerpt"]
+            ),
+            None,
+        )
+        if reference is None:
+            raise LLMCallError("能力匹配的引用无法在内部资料原文中定位")
+        visible_matches.append(match)
+        selected_refs.append(reference)
+
+    return visible_matches, selected_refs
+
+
 def _known_customer_value(value: object) -> bool:
     return isinstance(value, str) and value.strip() not in RESEARCH_PENDING_VALUES
 

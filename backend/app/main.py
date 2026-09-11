@@ -15,7 +15,7 @@ from .config import get_settings
 from .database import Base, SessionLocal, engine, get_db
 from .models import Artifact, ArtifactType, Customer, ExportArtifact, GenerationTask, KnowledgeDocument, PromptTemplate
 from .schemas import AnalyzeRequest, ArtifactRead, ArtifactUpdate, CustomerCreate, CustomerRead, KnowledgeRead, ModelTestRead, PromptRead, PromptUpdate, TaskRead, WebSearchRead, WebSearchRequest
-from .services.agent import LLMCallError, call_llm, clean_untrusted, demo_capabilities, demo_requirements, demo_script, demo_solution, merge_research_sources, normalize_research_output, preserve_solution_boundaries, public_research, retrieve_knowledge
+from .services.agent import LLMCallError, call_llm, clean_untrusted, demo_capabilities, demo_requirements, demo_script, demo_solution, merge_research_sources, normalize_research_output, preserve_solution_boundaries, public_research, resolve_capability_references, retrieve_knowledge
 from .services.documents import ALLOWED_EXTENSIONS, chunk_text, extract_text
 from .services.exporter import export_docx, export_pdf
 from .services.outputs import CapabilitiesOutput, ConnectionTestOutput, RequirementsOutput, ResearchOutput, SolutionOutput, VisitScriptOutput
@@ -404,18 +404,10 @@ async def execute_flow(task_id: str, payload: dict):
                     OUTPUT_EXAMPLES["capabilities"],
                 )
             if capabilities_result:
-                refs_by_id = {ref["document_id"]: ref for ref in refs}
-                visible_matches = []
-                selected_refs = []
-                for match in capabilities_result.data.get("匹配结果", []):
-                    document_id = match.pop("document_id", "")
-                    reference = refs_by_id.get(document_id)
-                    if not reference:
-                        raise LLMCallError("能力匹配引用了不存在的内部资料")
-                    if match.get("引用", "") not in reference.get("excerpt", ""):
-                        raise LLMCallError("能力匹配的引用无法在内部资料原文中定位")
-                    visible_matches.append(match)
-                    selected_refs.append(reference)
+                visible_matches, selected_refs = resolve_capability_references(
+                    capabilities_result.data.get("匹配结果", []),
+                    refs,
+                )
                 capabilities = {"匹配结果": visible_matches}
                 if capabilities_result.data.get("提示"):
                     capabilities["提示"] = capabilities_result.data["提示"]
