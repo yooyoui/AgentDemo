@@ -15,7 +15,7 @@ from .config import get_settings
 from .database import Base, SessionLocal, engine, get_db
 from .models import Artifact, ArtifactType, Customer, ExportArtifact, GenerationTask, KnowledgeDocument, PromptTemplate
 from .schemas import AnalyzeRequest, ArtifactRead, ArtifactUpdate, CustomerCreate, CustomerRead, KnowledgeRead, ModelTestRead, PromptRead, PromptUpdate, TaskRead
-from .services.agent import LLMCallError, call_llm, clean_untrusted, demo_capabilities, demo_requirements, demo_script, demo_solution, public_research, retrieve_knowledge
+from .services.agent import LLMCallError, call_llm, clean_untrusted, demo_capabilities, demo_requirements, demo_script, demo_solution, preserve_solution_boundaries, public_research, retrieve_knowledge
 from .services.documents import ALLOWED_EXTENSIONS, chunk_text, extract_text
 from .services.exporter import export_docx, export_pdf
 from .services.outputs import CapabilitiesOutput, ConnectionTestOutput, RequirementsOutput, ResearchOutput, SolutionOutput, VisitScriptOutput
@@ -338,7 +338,9 @@ async def execute_flow(task_id: str, payload: dict):
                 OUTPUT_EXAMPLES["script"],
             )
             script = script_result.data if script_result else demo_script(customer, requirements, solution, payload.get("visit_type", "首次拜访"), payload.get("customer_role", "业务负责人"), payload.get("style", "专业务实"))
-            if any(boundary not in script.get("禁止承诺", []) for boundary in solution.get("风险边界", [])):
+            script = preserve_solution_boundaries(script, solution)
+            authoritative_boundaries = [item.strip() for item in solution.get("风险边界", []) if isinstance(item, str) and item.strip()]
+            if any(boundary not in script["禁止承诺"] for boundary in authoritative_boundaries):
                 raise LLMCallError("拜访话术未完整保留方案风险边界")
             if script_result:
                 model_calls["script"] = {"latency_ms": script_result.latency_ms, "attempts": script_result.attempts}

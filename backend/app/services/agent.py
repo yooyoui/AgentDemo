@@ -203,6 +203,26 @@ def demo_solution(customer: Customer, requirements: dict, capabilities: dict) ->
     }
 
 
+def preserve_solution_boundaries(script: dict, solution: dict) -> dict:
+    """Keep authoritative solution boundaries in the generated visit script."""
+    result = dict(script)
+    merged: list[str] = []
+    seen: set[str] = set()
+    boundary_lists = (solution.get("风险边界", []), script.get("禁止承诺", []))
+    for items in boundary_lists:
+        if not isinstance(items, list):
+            continue
+        for raw_item in items:
+            if not isinstance(raw_item, str):
+                continue
+            item = raw_item.strip()
+            if item and item not in seen:
+                seen.add(item)
+                merged.append(item)
+    result["禁止承诺"] = merged
+    return result
+
+
 def demo_script(customer: Customer, requirements: dict, solution: dict, visit_type: str, customer_role: str, style: str) -> dict:
     return {
         "拜访设置": {"类型": visit_type, "客户角色": customer_role, "表达风格": style},
