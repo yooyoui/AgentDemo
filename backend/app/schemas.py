@@ -20,6 +20,13 @@ class CustomerRead(CustomerCreate):
     model_config = ConfigDict(from_attributes=True)
 
 
+class CustomerSearchResult(BaseModel):
+    customer: CustomerRead
+    score: int
+    match_reason: str
+    verification_status: str | None = None
+
+
 class CustomerDeleteRequest(BaseModel):
     confirmation_name: str = Field(min_length=2, max_length=200)
 
@@ -44,6 +51,59 @@ class WorkspaceOptionRead(BaseModel):
     is_builtin: bool
     sort_order: int
     created_at: datetime
+    model_config = ConfigDict(from_attributes=True)
+
+
+class OrganizationResolveRequest(BaseModel):
+    name: str = Field(min_length=2, max_length=200)
+    region: str = Field(default="", max_length=100)
+    industry: str = Field(default="", max_length=100)
+
+    @field_validator("name", "region", "industry")
+    @classmethod
+    def strip_entity_fields(cls, value: str) -> str:
+        return value.strip()
+
+
+class OrganizationCandidate(BaseModel):
+    canonical_name: str
+    entity_type: str
+    region: str
+    industry: str
+    official_url: str | None = None
+    registration_code: str | None = None
+    evidence: list[dict[str, Any]]
+    score: int
+    confidence: Literal["high", "medium", "low"]
+    match_reasons: list[str]
+
+
+class OrganizationResolveRead(BaseModel):
+    candidates: list[OrganizationCandidate]
+    cache_hit: bool
+    auto_selected_index: int | None = None
+    searched_at: datetime
+
+
+class OrganizationIdentityConfirm(BaseModel):
+    entered_name: str = Field(min_length=2, max_length=200)
+    candidate: OrganizationCandidate | None = None
+    use_entered_name: bool = False
+
+
+class OrganizationIdentityRead(BaseModel):
+    id: str
+    customer_id: str
+    entered_name: str
+    canonical_name: str
+    entity_type: str
+    region: str
+    industry: str
+    official_url: str | None
+    registration_code: str | None
+    verification_status: str
+    evidence: list[dict[str, Any]]
+    confirmed_at: datetime
     model_config = ConfigDict(from_attributes=True)
 
 

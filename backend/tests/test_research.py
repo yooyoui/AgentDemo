@@ -96,6 +96,16 @@ class ResearchGenerationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(research["结构化档案"]), 10)
         self.assertEqual(citations, self.citations)
 
+    async def test_model_name_normalization_does_not_fail_research(self):
+        payload = research_payload()
+        payload["客户"] = "示例企业有限公司（规范名称）"
+        with (
+            patch("app.main.public_research", new=AsyncMock(return_value=self.public_result)),
+            patch("app.main.call_llm", new=AsyncMock(return_value=model_result(payload))),
+        ):
+            research, _, _, _ = await generate_customer_research(self.customer, "客户摸底")
+        self.assertEqual(research["客户"], self.customer.name)
+
     async def test_noncritical_missing_field_does_not_trigger_followup(self):
         first = research_payload(missing={"成立时间"})
         with (

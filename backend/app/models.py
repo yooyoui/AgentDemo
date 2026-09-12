@@ -103,3 +103,32 @@ class WorkspaceOption(Base):
     is_builtin: Mapped[bool] = mapped_column(Boolean, default=False)
     sort_order: Mapped[int] = mapped_column(Integer, default=100)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
+
+
+class OrganizationIdentity(Base):
+    __tablename__ = "organization_identities"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    customer_id: Mapped[str] = mapped_column(ForeignKey("customers.id"), unique=True, index=True)
+    entered_name: Mapped[str] = mapped_column(String(200))
+    canonical_name: Mapped[str] = mapped_column(String(200))
+    entity_type: Mapped[str] = mapped_column(String(50), default="其他组织")
+    region: Mapped[str] = mapped_column(String(100), default="待补充")
+    industry: Mapped[str] = mapped_column(String(100), default="待补充")
+    official_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    registration_code: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    verification_status: Mapped[str] = mapped_column(String(30), default="unverified")
+    evidence: Mapped[list] = mapped_column(JSON, default=list)
+    confirmed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc, onupdate=now_utc)
+
+
+class EntityResolutionCache(Base):
+    __tablename__ = "entity_resolution_cache"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    cache_key: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    query_name: Mapped[str] = mapped_column(String(200))
+    region: Mapped[str] = mapped_column(String(100), default="")
+    industry: Mapped[str] = mapped_column(String(100), default="")
+    candidates: Mapped[list] = mapped_column(JSON, default=list)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))

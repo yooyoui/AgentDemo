@@ -50,16 +50,21 @@ class SearchServiceTests(unittest.IsolatedAsyncioTestCase):
         self.original_base_url = settings.llm_base_url
         self.original_search_model = settings.llm_search_model
         self.original_retries = settings.llm_max_retries
+        self.original_environment = settings.app_environment
+        self.original_external_enabled = settings.external_data_transmission_enabled
         settings.llm_api_key = "test-deepseek-key"
         settings.llm_base_url = "https://api.deepseek.com"
         settings.llm_search_model = "deepseek-v4-pro"
         settings.llm_max_retries = 0
+        settings.app_environment = "development"
 
     def tearDown(self):
         settings.llm_api_key = self.original_key
         settings.llm_base_url = self.original_base_url
         settings.llm_search_model = self.original_search_model
         settings.llm_max_retries = self.original_retries
+        settings.app_environment = self.original_environment
+        settings.external_data_transmission_enabled = self.original_external_enabled
 
     async def test_success_uses_deepseek_native_web_search_and_normalizes_results(self):
         client = FakeClient(search_response([
@@ -86,6 +91,15 @@ class SearchServiceTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(WebSearchError, "尚未配置") as caught:
             await search_web("示例查询", client=client)
         self.assertEqual(caught.exception.status_code, 503)
+        self.assertEqual(client.calls, [])
+
+    async def test_production_blocks_external_search_without_explicit_opt_in(self):
+        settings.app_environment = "production"
+        settings.external_data_transmission_enabled = False
+        client = FakeClient()
+        with self.assertRaisesRegex(WebSearchError, "尚未明确启用") as caught:
+            await search_web("示例查询", client=client)
+        self.assertEqual(caught.exception.status_code, 403)
         self.assertEqual(client.calls, [])
 
     async def test_auth_failure_does_not_expose_key(self):

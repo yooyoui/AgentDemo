@@ -84,14 +84,12 @@ function CapabilitiesView({ artifact, onSource }: { artifact: Artifact; onSource
   return <div className="artifact-content">
     {matches.length ? <div className="capability-grid">{matches.map((item, index) => {
       const quote = text(item["引用"], "");
-      const citation = artifact.citations.find((entry) => entry.document_id === item.document_id && entry.excerpt?.includes(quote))
-        || artifact.citations.find((entry) => entry.document_id === item.document_id)
-        || artifact.citations[index] || {};
+      const citation = artifact.citations.find((entry) => entry.document_id === item.document_id && entry.excerpt?.includes(quote));
       return <section className="capability-card" key={`${text(item["能力"])}-${index}`}>
         <div className="card-title-row"><h4>{text(item["能力"], "待确认能力")}</h4><span>{text(item["类别"], "未分类")}</span></div>
         <dl><dt>匹配理由</dt><dd>{text(item["匹配理由"])}</dd><dt>适用条件</dt><dd>{text(item["适用条件"])}</dd></dl>
         <blockquote>{text(item["引用"], "暂无可定位原文")}</blockquote>
-        <button className="text-action" onClick={() => onSource({ ...citation, quote })}>查看证据</button>
+        {citation ? <button className="text-action" onClick={() => onSource({ ...citation, quote })}>查看证据</button> : <p className="evidence-missing">证据无法匹配，请重新生成能力匹配</p>}
       </section>;
     })}</div> : <div className="empty-inline">{text(content["提示"], "当前没有可引用的内部能力依据。")}</div>}
   </div>;

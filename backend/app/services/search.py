@@ -128,6 +128,8 @@ async def _request_search(client: httpx.AsyncClient, request: dict, max_results:
 async def search_web(query: str, max_results: int = 5, client: httpx.AsyncClient | None = None) -> list[dict]:
     if not settings.llm_api_key:
         raise WebSearchError("尚未配置 LLM_API_KEY，DeepSeek 联网搜索不可用", 503)
+    if not settings.external_calls_allowed:
+        raise WebSearchError("生产环境尚未明确启用外部数据传输", 403)
 
     request = {
         "model": settings.llm_search_model,

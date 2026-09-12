@@ -370,6 +370,8 @@ async def call_llm(
 ) -> LLMCallResult | None:
     if not settings.llm_api_key:
         return None
+    if not settings.external_calls_allowed:
+        raise LLMCallError("生产环境尚未明确启用外部数据传输")
     schema = output_model.model_json_schema(by_alias=True)
     request = {
         "model": settings.llm_model,

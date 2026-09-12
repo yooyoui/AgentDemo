@@ -3,9 +3,10 @@ import time
 import uuid
 from collections import defaultdict, deque
 from datetime import datetime, timezone
+from difflib import SequenceMatcher
 from pathlib import Path
 
-from fastapi import BackgroundTasks, Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi import BackgroundTasks, Depends, FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, Response
 from sqlalchemy import delete, func, select
@@ -13,11 +14,12 @@ from sqlalchemy.orm import Session
 
 from .config import get_settings
 from .database import Base, SessionLocal, engine, get_db
-from .models import Artifact, ArtifactType, Customer, ExportArtifact, GenerationTask, KnowledgeDocument, PromptTemplate, WorkspaceOption
-from .schemas import AnalyzeRequest, ArtifactRead, ArtifactUpdate, CustomerCreate, CustomerDeleteRequest, CustomerRead, KnowledgeRead, ModelTestRead, PromptRead, PromptUpdate, TaskRead, WebSearchRead, WebSearchRequest, WorkspaceOptionCreate, WorkspaceOptionRead
+from .models import Artifact, ArtifactType, Customer, EntityResolutionCache, ExportArtifact, GenerationTask, KnowledgeDocument, OrganizationIdentity, PromptTemplate, WorkspaceOption
+from .schemas import AnalyzeRequest, ArtifactRead, ArtifactUpdate, CustomerCreate, CustomerDeleteRequest, CustomerRead, CustomerSearchResult, KnowledgeRead, ModelTestRead, OrganizationIdentityConfirm, OrganizationIdentityRead, OrganizationResolveRead, OrganizationResolveRequest, PromptRead, PromptUpdate, TaskRead, WebSearchRead, WebSearchRequest, WorkspaceOptionCreate, WorkspaceOptionRead
 from .services.agent import LLMCallError, call_llm, clean_untrusted, demo_capabilities, demo_requirements, demo_script, demo_solution, merge_research_sources, normalize_research_output, preserve_solution_boundaries, public_research, resolve_capability_references, retrieve_knowledge
 from .services.artifact_edit import ArtifactEditError, prepare_artifact_update
 from .services.documents import ALLOWED_EXTENSIONS, chunk_text, extract_text
+from .services.entity_resolution import normalize_name, resolve_entities
 from .services.exporter import export_docx, export_pdf
 from .services.outputs import CapabilitiesOutput, ConnectionTestOutput, RequirementsOutput, ResearchOutput, SolutionOutput, VisitScriptOutput
 from .services.search import WebSearchError, search_web
@@ -136,6 +138,7 @@ def health():
         "model_status": "configured" if settings.llm_api_key else "demo",
         "research": "deepseek-web" if settings.llm_api_key else "demo",
         "research_model": settings.llm_search_model if settings.llm_api_key else "demo-rules",
+        "external_data_transmission": "enabled" if settings.external_calls_allowed else "blocked",
     }
 
 
@@ -171,6 +174,94 @@ def create_customer(payload: CustomerCreate, db: Session = Depends(get_db)):
     db.commit()
     db.refresh(customer)
     return customer
+
+
+@app.get("/api/v1/customers/search", response_model=list[CustomerSearchResult])
+def search_customers(q: str = Query(min_length=1, max_length=200), limit: int = Query(3, ge=1, le=10), db: Session = Depends(get_db)):
+    query = normalize_name(q)
+    if not query:
+        return []
+    identities = {item.customer_id: item for item in db.scalars(select(OrganizationIdentity)).all()}
+    matches = []
+    for customer in db.scalars(select(Customer)).all():
+        identity = identities.get(customer.id)
+        names = [customer.name]
+        if identity:
+            names.extend([identity.entered_name, identity.canonical_name])
+        normalized = [normalize_name(name) for name in names if name]
+        if query in normalized:
+            score, reason = 100, "名称完全匹配"
+        elif any(query in name or name in query for name in normalized):
+            score, reason = 85, "名称包含匹配"
+        else:
+            score = round(max((SequenceMatcher(None, query, name).ratio() for name in normalized), default=0) * 75)
+            reason = "名称相似"
+        if score >= 35:
+            matches.append(CustomerSearchResult(
+                customer=CustomerRead.model_validate(customer),
+                score=score,
+                match_reason=reason,
+                verification_status=identity.verification_status if identity else None,
+            ))
+    return sorted(matches, key=lambda item: (-item.score, item.customer.name))[:limit]
+
+
+@app.post("/api/v1/organization-identities/resolve", response_model=OrganizationResolveRead)
+async def resolve_organization(payload: OrganizationResolveRequest, db: Session = Depends(get_db)):
+    try:
+        candidates, cache_hit, auto_selected = await resolve_entities(db, payload.name, payload.region, payload.industry)
+    except WebSearchError as exc:
+        raise HTTPException(exc.status_code, str(exc)) from exc
+    except LLMCallError as exc:
+        raise HTTPException(502, safe_error(exc)) from exc
+    return OrganizationResolveRead(candidates=candidates, cache_hit=cache_hit, auto_selected_index=auto_selected, searched_at=datetime.now(timezone.utc))
+
+
+@app.get("/api/v1/customers/{customer_id}/identity", response_model=OrganizationIdentityRead)
+def get_organization_identity(customer_id: str, db: Session = Depends(get_db)):
+    if not db.get(Customer, customer_id):
+        raise HTTPException(404, "客户不存在")
+    identity = db.scalar(select(OrganizationIdentity).where(OrganizationIdentity.customer_id == customer_id))
+    if not identity:
+        raise HTTPException(404, "客户主体尚未确认")
+    return identity
+
+
+@app.post("/api/v1/customers/{customer_id}/identity", response_model=OrganizationIdentityRead)
+def confirm_organization_identity(customer_id: str, payload: OrganizationIdentityConfirm, db: Session = Depends(get_db)):
+    customer = db.get(Customer, customer_id)
+    if not customer:
+        raise HTTPException(404, "客户不存在")
+    if bool(payload.candidate) == bool(payload.use_entered_name):
+        raise HTTPException(422, "必须选择一个候选主体，或明确沿用输入名称")
+    candidate = payload.candidate
+    values = {
+        "entered_name": payload.entered_name.strip(),
+        "canonical_name": candidate.canonical_name if candidate else payload.entered_name.strip(),
+        "entity_type": candidate.entity_type if candidate else "其他组织",
+        "region": candidate.region if candidate else customer.region,
+        "industry": candidate.industry if candidate else customer.industry,
+        "official_url": candidate.official_url if candidate else None,
+        "registration_code": candidate.registration_code if candidate else None,
+        "verification_status": "verified" if candidate else "unverified",
+        "evidence": candidate.evidence if candidate else [],
+        "confirmed_at": datetime.now(timezone.utc),
+    }
+    identity = db.scalar(select(OrganizationIdentity).where(OrganizationIdentity.customer_id == customer_id))
+    if identity:
+        for key, value in values.items():
+            setattr(identity, key, value)
+    else:
+        identity = OrganizationIdentity(customer_id=customer_id, **values)
+        db.add(identity)
+    customer.name = values["canonical_name"]
+    if candidate and customer.region in {"", "待补充"}:
+        customer.region = candidate.region
+    if candidate and customer.industry in {"", "待补充"}:
+        customer.industry = candidate.industry
+    db.commit()
+    db.refresh(identity)
+    return identity
 
 
 @app.get("/api/customers/{customer_id}", response_model=CustomerRead)
@@ -213,6 +304,7 @@ def delete_customer(customer_id: str, payload: CustomerDeleteRequest, db: Sessio
             raise HTTPException(500, "导出文件删除失败，客户数据未删除") from exc
     db.execute(delete(ExportArtifact).where(ExportArtifact.customer_id == customer_id))
     db.execute(delete(GenerationTask).where(GenerationTask.customer_id == customer_id))
+    db.execute(delete(OrganizationIdentity).where(OrganizationIdentity.customer_id == customer_id))
     db.delete(customer)
     db.commit()
     return Response(status_code=204)
@@ -374,8 +466,10 @@ async def generate_customer_research(customer: Customer, prompt: str) -> tuple[d
     if first_result:
         extraction_results.append(first_result)
     raw_research = first_result.data if first_result else fallback
-    if raw_research.get("客户") != customer.name:
-        raise LLMCallError("客户摸底结果中的客户名称不一致")
+    # The identity-resolution step owns the canonical customer name. Model output
+    # may use an alias or normalize punctuation, so it must not become a brittle
+    # validation gate for an otherwise valid research response.
+    raw_research["客户"] = customer.name
     research, metadata = normalize_research_output(raw_research, customer, citations)
 
     if settings.llm_api_key and (metadata["critical_missing"] or metadata["entity_conflict"]):

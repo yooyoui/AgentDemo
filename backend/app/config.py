@@ -13,6 +13,8 @@ class Settings(BaseSettings):
     storage_dir: Path = Path("./uploads")
     export_dir: Path = Path("./exports")
     max_upload_mb: int = 15
+    app_environment: str = "development"
+    external_data_transmission_enabled: bool = False
     llm_api_key: str = ""
     llm_base_url: str = "https://api.deepseek.com"
     llm_model: str = "deepseek-v4-flash"
@@ -27,6 +29,10 @@ class Settings(BaseSettings):
     @property
     def origins(self) -> list[str]:
         return [x.strip() for x in self.cors_origins.split(",") if x.strip()]
+
+    @property
+    def external_calls_allowed(self) -> bool:
+        return self.app_environment.strip().lower() != "production" or self.external_data_transmission_enabled
 
 
 @lru_cache

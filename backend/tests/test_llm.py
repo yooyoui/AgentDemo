@@ -34,12 +34,17 @@ class LLMTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.original_key = settings.llm_api_key
         self.original_retries = settings.llm_max_retries
+        self.original_environment = settings.app_environment
+        self.original_external_enabled = settings.external_data_transmission_enabled
         settings.llm_api_key = "test-secret-key"
         settings.llm_max_retries = 0
+        settings.app_environment = "development"
 
     def tearDown(self):
         settings.llm_api_key = self.original_key
         settings.llm_max_retries = self.original_retries
+        settings.app_environment = self.original_environment
+        settings.external_data_transmission_enabled = self.original_external_enabled
 
     async def test_valid_json_is_validated(self):
         data = {
@@ -53,6 +58,14 @@ class LLMTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sent["model"], settings.llm_model)
         self.assertEqual(sent["thinking"], {"type": "disabled"})
         self.assertEqual(sent["response_format"], {"type": "json_object"})
+
+    async def test_production_blocks_model_without_explicit_external_opt_in(self):
+        settings.app_environment = "production"
+        settings.external_data_transmission_enabled = False
+        client = FakeClient([])
+        with self.assertRaisesRegex(LLMCallError, "尚未明确启用"):
+            await call_llm("测试", {}, ConnectionTestOutput, {"status": "ok"}, client)
+        self.assertEqual(client.calls, [])
 
     async def test_empty_content_retries_twice_then_fails(self):
         settings.llm_max_retries = 2

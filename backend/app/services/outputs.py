@@ -85,3 +85,17 @@ class VisitScriptOutput(StrictOutput):
 
 class ConnectionTestOutput(StrictOutput):
     status: Literal["ok"]
+
+
+class EntityCandidateOutput(StrictOutput):
+    canonical_name: str = Field(min_length=2, max_length=200)
+    entity_type: str = Field(min_length=1, max_length=50)
+    region: str = Field(default="待补充", max_length=100)
+    industry: str = Field(default="待补充", max_length=100)
+    official_url: HttpUrl | None = None
+    registration_code: str | None = Field(default=None, max_length=50)
+    evidence_urls: list[HttpUrl]
+
+
+class EntityResolutionOutput(StrictOutput):
+    candidates: list[EntityCandidateOutput] = Field(max_length=10)

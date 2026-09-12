@@ -1,9 +1,9 @@
 "use client";
 
-import { ChangeEvent, useEffect, useMemo, useState } from "react";
+import { ChangeEvent, useEffect, useMemo, useRef, useState } from "react";
 import { BookOpen, Check, ChevronRight, CircleAlert, Edit3, FileDown, FileText, LayoutDashboard, LoaderCircle, MessageSquareText, Plus, RefreshCw, Search, Settings2, SlidersHorizontal, Sparkles, Trash2, Upload, Wifi, WifiOff, X } from "lucide-react";
 import { ArtifactEditor, ArtifactRenderer, SourceDrawer, type SourceInfo } from "@/components/artifacts";
-import { API_URL, api, Artifact, Customer, Health, Knowledge, Prompt, WorkspaceOption } from "@/lib/api";
+import { API_URL, api, Artifact, Customer, CustomerSearchResult, Health, Knowledge, OrganizationCandidate, OrganizationIdentity, Prompt, WorkspaceOption } from "@/lib/api";
 
 type View = "workspace" | "knowledge" | "prompts";
 type OptionKind = WorkspaceOption["kind"];
@@ -23,7 +23,7 @@ export default function Home() {
   const [busy, setBusy] = useState(false);
   const [progress, setProgress] = useState(0);
   const [error, setError] = useState("");
-  const [communication, setCommunication] = useState("客户希望提升跨部门协同效率，目前资料由人工汇总，耗时且缺少统一数据口径。希望先了解可快速落地的建设方案，并关注数据安全和投入周期。");
+  const [communication, setCommunication] = useState("");
   const [visitType, setVisitType] = useState("首次拜访");
   const [customerRole, setCustomerRole] = useState("业务负责人");
   const [style, setStyle] = useState("专业务实");
@@ -34,6 +34,16 @@ export default function Home() {
   const [deleteName, setDeleteName] = useState("");
   const [optionKind, setOptionKind] = useState<OptionKind | null>(null);
   const [newOption, setNewOption] = useState("");
+  const [customerQuery, setCustomerQuery] = useState("");
+  const [customerMatches, setCustomerMatches] = useState<CustomerSearchResult[]>([]);
+  const [identity, setIdentity] = useState<OrganizationIdentity | null>(null);
+  const [resolutionTarget, setResolutionTarget] = useState<"selected" | "new" | null>(null);
+  const [resolutionEntered, setResolutionEntered] = useState("");
+  const [candidates, setCandidates] = useState<OrganizationCandidate[]>([]);
+  const [resolutionBusy, setResolutionBusy] = useState(false);
+  const [pendingNewIdentity, setPendingNewIdentity] = useState<{ entered_name: string; candidate?: OrganizationCandidate; use_entered_name?: boolean } | null>(null);
+  const selectedIdRef = useRef("");
+  const pollTimerRef = useRef<number | null>(null);
   const selected = customers.find((item) => item.id === selectedId);
   const confirmedCount = artifacts.filter((item) => item.confirmed).length;
   const allConfirmed = artifacts.length === 5 && confirmedCount === artifacts.length;
@@ -44,15 +54,34 @@ export default function Home() {
   }, [artifacts]);
 
   const loadBase = async () => {
-    try {
-      const [cs, ks, ps, hs, os] = await Promise.all([api.customers(), api.knowledge(), api.prompts(), api.health(), api.workspaceOptions()]);
-      setCustomers(cs); setKnowledge(ks); setPrompts(ps); setHealth(hs); setOptions(os);
-      if (!selectedId && cs[0]) setSelectedId(cs[0].id);
-    } catch (e) { setError(e instanceof Error ? e.message : "后端服务暂不可用"); }
+    const [cs, ks, ps, hs, os] = await Promise.allSettled([api.customers(), api.knowledge(), api.prompts(), api.health(), api.workspaceOptions()]);
+    if (cs.status === "fulfilled") { setCustomers(cs.value); if (!selectedIdRef.current && cs.value[0]) setSelectedId(cs.value[0].id); }
+    if (ks.status === "fulfilled") setKnowledge(ks.value);
+    if (ps.status === "fulfilled") setPrompts(ps.value);
+    if (hs.status === "fulfilled") setHealth(hs.value);
+    if (os.status === "fulfilled") setOptions(os.value);
+    const failed = [cs, ks, ps, hs, os].filter((item) => item.status === "rejected").length;
+    if (failed) setError(`有 ${failed} 项基础数据加载失败，可刷新后重试`);
   };
 
-  useEffect(() => { void loadBase(); }, []);
-  useEffect(() => { setEditingId(""); setSource(null); if (selectedId) api.artifacts(selectedId).then(setArtifacts).catch(() => setArtifacts([])); else setArtifacts([]); }, [selectedId]);
+  useEffect(() => { void loadBase(); return () => { if (pollTimerRef.current) window.clearInterval(pollTimerRef.current); }; }, []);
+  useEffect(() => {
+    selectedIdRef.current = selectedId;
+    setEditingId(""); setSource(null); setArtifacts([]);
+    setCommunication(selectedId ? window.localStorage.getItem(`visit-communication:${selectedId}`) || "" : "");
+    setIdentity(null);
+    if (!selectedId) return;
+    const controller = new AbortController();
+    api.artifacts(selectedId, controller.signal).then((items) => { if (selectedIdRef.current === selectedId) setArtifacts(items); }).catch((reason) => { if (reason?.name !== "AbortError" && selectedIdRef.current === selectedId) setArtifacts([]); });
+    api.organizationIdentity(selectedId, controller.signal).then((item) => { if (selectedIdRef.current === selectedId) setIdentity(item); }).catch(() => undefined);
+    return () => controller.abort();
+  }, [selectedId]);
+  useEffect(() => {
+    if (!customerQuery.trim()) { setCustomerMatches([]); return; }
+    const controller = new AbortController();
+    const timer = window.setTimeout(() => api.searchCustomers(customerQuery, controller.signal).then(setCustomerMatches).catch((reason) => { if (reason?.name !== "AbortError") setCustomerMatches([]); }), 250);
+    return () => { window.clearTimeout(timer); controller.abort(); };
+  }, [customerQuery]);
   useEffect(() => {
     const context = typeof document === "undefined" ? undefined : document.modelContext;
     if (!context?.registerTool) return;
@@ -75,11 +104,41 @@ export default function Home() {
 
   const createCustomer = async () => {
     if (!newCustomer.name.trim()) return setError("请填写客户单位名称");
+    if (!pendingNewIdentity || pendingNewIdentity.entered_name !== newCustomer.name.trim()) return setError("请先识别客户主体，并选择候选或明确沿用输入名称");
     setBusy(true); setError("");
     try {
-      const customer = await api.createCustomer({ ...newCustomer, industry: newCustomer.industry || "待补充", nature: newCustomer.nature || "待补充", region: newCustomer.region || "待补充" });
-      setCustomers([customer, ...customers]); setSelectedId(customer.id); setNewCustomer({ name: "", industry: "", nature: "", region: "", notes: "" });
+      const createName = pendingNewIdentity.candidate?.canonical_name || newCustomer.name.trim();
+      let customer = await api.createCustomer({ ...newCustomer, name: createName, industry: newCustomer.industry || "待补充", nature: newCustomer.nature || "待补充", region: newCustomer.region || "待补充" });
+      const confirmedIdentity = await api.confirmOrganizationIdentity(customer.id, pendingNewIdentity);
+      customer = { ...customer, name: confirmedIdentity.canonical_name, region: confirmedIdentity.region || customer.region, industry: confirmedIdentity.industry || customer.industry };
+      setIdentity(confirmedIdentity); setCustomers([customer, ...customers]); setSelectedId(customer.id); setNewCustomer({ name: "", industry: "", nature: "", region: "", notes: "" }); setPendingNewIdentity(null);
     } catch (e) { setError(e instanceof Error ? e.message : "创建失败"); } finally { setBusy(false); }
+  };
+
+  const startResolution = async (target: "selected" | "new") => {
+    const source = target === "selected" ? selected : newCustomer;
+    if (!source?.name.trim()) return setError("请先填写客户单位名称");
+    setResolutionTarget(target); setResolutionEntered(source.name.trim()); setCandidates([]); setResolutionBusy(true); setError("");
+    try {
+      const result = await api.resolveOrganization({ name: source.name.trim(), region: source.region || "", industry: source.industry || "" });
+      setCandidates(result.candidates);
+    } catch (e) { setError(e instanceof Error ? `${e.message}；仍可明确沿用输入名称` : "主体识别失败"); }
+    finally { setResolutionBusy(false); }
+  };
+
+  const chooseIdentity = async (candidate?: OrganizationCandidate) => {
+    const payload = { entered_name: resolutionEntered, ...(candidate ? { candidate } : { use_entered_name: true }) };
+    if (resolutionTarget === "new") {
+      setPendingNewIdentity(payload); setResolutionTarget(null); return;
+    }
+    if (!selected) return;
+    setResolutionBusy(true); setError("");
+    try {
+      const confirmed = await api.confirmOrganizationIdentity(selected.id, payload); setIdentity(confirmed);
+      setCustomers((items) => items.map((item) => item.id === selected.id ? { ...item, name: confirmed.canonical_name, region: confirmed.region, industry: confirmed.industry } : item));
+      setResolutionTarget(null);
+    } catch (e) { setError(e instanceof Error ? e.message : "主体确认失败"); }
+    finally { setResolutionBusy(false); }
   };
 
   const deleteCustomer = async () => {
@@ -92,32 +151,42 @@ export default function Home() {
     } catch (e) { setError(e instanceof Error ? e.message : "删除客户失败"); } finally { setBusy(false); }
   };
 
-  const poll = (taskId: string, failure: string) => {
-    const timer = window.setInterval(async () => {
+  const updateCommunication = (value: string) => {
+    setCommunication(value);
+    if (selectedId) window.localStorage.setItem(`visit-communication:${selectedId}`, value);
+  };
+
+  const poll = (taskId: string, customerId: string, failure: string) => {
+    if (pollTimerRef.current) window.clearInterval(pollTimerRef.current);
+    pollTimerRef.current = window.setInterval(async () => {
       try {
-        const latest = await api.task(taskId); setProgress(latest.progress);
+        const latest = await api.task(taskId);
+        if (selectedIdRef.current === customerId) setProgress(latest.progress);
         if (latest.status === "completed" || latest.status === "failed") {
-          window.clearInterval(timer); setBusy(false);
+          if (pollTimerRef.current) window.clearInterval(pollTimerRef.current);
+          pollTimerRef.current = null; setBusy(false);
           if (latest.status === "failed") setError(latest.error || failure);
-          else setArtifacts(await api.artifacts(selectedId));
+          else if (selectedIdRef.current === customerId) setArtifacts(await api.artifacts(customerId));
         }
-      } catch { window.clearInterval(timer); setBusy(false); setError("无法获取任务进度"); }
+      } catch { if (pollTimerRef.current) window.clearInterval(pollTimerRef.current); pollTimerRef.current = null; setBusy(false); setError("无法获取任务进度，请刷新页面恢复"); }
     }, 900);
   };
 
   const runAll = async () => {
     if (!selectedId) return setError("请先新建或选择客户");
+    if (!identity) return setError("请先点击“识别主体”，选择可信候选或明确沿用输入名称");
     if (artifacts.length > 0 && !window.confirm("重新生成会创建新版本，并取消当前五项材料的确认状态。是否继续？")) return;
     setBusy(true); setError(""); setProgress(2);
-    try { poll((await api.runAll(selectedId, { communication, visit_type: visitType, customer_role: customerRole, style })).id, "生成失败"); }
+    try { const customerId = selectedId; poll((await api.runAll(customerId, { communication, visit_type: visitType, customer_role: customerRole, style })).id, customerId, "生成失败"); }
     catch (e) { setBusy(false); setError(e instanceof Error ? e.message : "生成失败"); }
   };
 
   const runResearch = async () => {
     if (!selectedId) return setError("请先新建或选择客户");
+    if (!identity) return setError("请先点击“识别主体”，选择可信候选或明确沿用输入名称");
     if (artifacts.some((item) => item.type === "research") && !window.confirm("重新联网摸底会创建新版本，并将客户摸底恢复为待确认。是否继续？")) return;
     setBusy(true); setError(""); setProgress(2);
-    try { poll((await api.runResearch(selectedId)).id, "客户摸底生成失败"); }
+    try { const customerId = selectedId; poll((await api.runResearch(customerId)).id, customerId, "客户摸底生成失败"); }
     catch (e) { setBusy(false); setError(e instanceof Error ? e.message : "客户摸底生成失败"); }
   };
 
@@ -164,9 +233,11 @@ export default function Home() {
   };
   const exportFile = async (format: "docx" | "pdf") => {
     if (!selectedId || !allConfirmed) return setError("请先逐项确认全部五份材料");
-    const response = await fetch(`${API_URL}/customers/${selectedId}/export/${format}`, { method: "POST" });
-    if (!response.ok) return setError((await response.json().catch(() => ({}))).detail || "导出失败");
-    const blob = await response.blob(); const url = URL.createObjectURL(blob); const anchor = document.createElement("a"); anchor.href = url; anchor.download = `${selected?.name || "客户"}拜访准备材料.${format}`; anchor.click(); URL.revokeObjectURL(url);
+    try {
+      const response = await fetch(`${API_URL}/customers/${selectedId}/export/${format}`, { method: "POST" });
+      if (!response.ok) return setError((await response.json().catch(() => ({}))).detail || "导出失败");
+      const blob = await response.blob(); const url = URL.createObjectURL(blob); const anchor = document.createElement("a"); anchor.href = url; anchor.download = `${selected?.name || "客户"}拜访准备材料.${format}`; anchor.click(); URL.revokeObjectURL(url);
+    } catch { setError("导出网络请求失败，请稍后重试"); }
   };
 
   return <main className="app-shell">
@@ -181,10 +252,13 @@ export default function Home() {
       {view === "workspace" && <div className="workspace">
         <section className="control-panel">
           <div className="panel-head"><div><span className="section-index">01</span><h2>选择客户</h2></div><span className="shared-badge">共享空间</span></div>
-          <label>已有客户<div className="customer-select-row"><select value={selectedId} onChange={(event) => setSelectedId(event.target.value)}><option value="">请选择</option>{customers.map((item) => <option value={item.id} key={item.id}>{item.name}</option>)}</select><button type="button" className="danger-icon" disabled={!selected || busy} onClick={() => { setDeleteName(""); setDeleteOpen(true); }} title="删除当前客户"><Trash2 size={17} /></button></div></label>
-          <details className="new-customer"><summary><Plus size={16} />新建客户档案</summary><div className="form-grid"><label className="wide">单位名称<input value={newCustomer.name} onChange={(event) => setNewCustomer({ ...newCustomer, name: event.target.value })} placeholder="输入政企客户完整名称" /></label><label>所属行业<input value={newCustomer.industry} onChange={(event) => setNewCustomer({ ...newCustomer, industry: event.target.value })} placeholder="如：政务、制造" /></label><label>所在地区<input value={newCustomer.region} onChange={(event) => setNewCustomer({ ...newCustomer, region: event.target.value })} placeholder="省 / 市" /></label><button className="secondary wide" onClick={createCustomer} disabled={busy}>保存客户档案</button></div></details>
+          <label>已有客户<input value={customerQuery} onChange={(event) => setCustomerQuery(event.target.value)} placeholder="输入简称或名称，优先匹配本地客户" /></label>
+          {!!customerMatches.length && <div className="customer-matches">{customerMatches.map((match) => <button key={match.customer.id} onClick={() => { setSelectedId(match.customer.id); setCustomerQuery(""); setCustomerMatches([]); }}><span><strong>{match.customer.name}</strong><small>{match.match_reason} · {match.score}%</small></span><em>{match.verification_status === "verified" ? "已核实" : match.verification_status === "unverified" ? "未核实" : "待识别"}</em></button>)}</div>}
+          <div className="customer-select-row"><select value={selectedId} onChange={(event) => setSelectedId(event.target.value)}><option value="">请选择</option>{customers.map((item) => <option value={item.id} key={item.id}>{item.name}</option>)}</select><button type="button" className="secondary identity-button" disabled={!selected || busy} onClick={() => void startResolution("selected")}><Search size={15} />识别主体</button><button type="button" className="danger-icon" disabled={!selected || busy} onClick={() => { setDeleteName(""); setDeleteOpen(true); }} title="删除当前客户"><Trash2 size={17} /></button></div>
+          {selected && <div className={`identity-status ${identity?.verification_status || "missing"}`}><span>{identity?.verification_status === "verified" ? "主体已核实" : identity?.verification_status === "unverified" ? "主体未核实（已明确沿用输入）" : "尚未确认组织主体"}</span>{identity && <small>输入：{identity.entered_name} · 标准名称：{identity.canonical_name}</small>}</div>}
+          <details className="new-customer"><summary><Plus size={16} />新建客户档案</summary><div className="form-grid"><label className="wide">单位名称<input value={newCustomer.name} onChange={(event) => { setNewCustomer({ ...newCustomer, name: event.target.value }); setPendingNewIdentity(null); }} placeholder="可输入简称，随后识别主体" /></label><label>所属行业<input value={newCustomer.industry} onChange={(event) => { setNewCustomer({ ...newCustomer, industry: event.target.value }); setPendingNewIdentity(null); }} placeholder="如：政务、制造" /></label><label>所在地区<input value={newCustomer.region} onChange={(event) => { setNewCustomer({ ...newCustomer, region: event.target.value }); setPendingNewIdentity(null); }} placeholder="省 / 市" /></label><button className="secondary wide" onClick={() => void startResolution("new")} disabled={busy || !newCustomer.name.trim()}><Search size={15} />识别客户主体（最多 3 个候选）</button>{pendingNewIdentity && <p className="wide identity-choice">{pendingNewIdentity.candidate ? `已选择：${pendingNewIdentity.candidate.canonical_name}` : "已选择：沿用输入名称（未核实）"}</p>}<button className="secondary wide" onClick={createCustomer} disabled={busy || !pendingNewIdentity}>保存客户档案</button></div></details>
           <div className="divider" /><div className="panel-head compact"><div><span className="section-index">02</span><h2>输入沟通背景</h2></div></div>
-          <label>前期沟通记录<textarea value={communication} onChange={(event) => setCommunication(event.target.value)} rows={8} placeholder="粘贴聊天记录、会议纪要或客户描述……" /></label>
+          <label>前期沟通记录<textarea value={communication} onChange={(event) => updateCommunication(event.target.value)} rows={8} placeholder="粘贴当前客户的聊天记录、会议纪要或客户描述……" /></label>
           <div className="form-grid">{([
             ["拜访类型", "visit_type", visitType, setVisitType], ["客户角色", "customer_role", customerRole, setCustomerRole], ["表达风格", "style", style, setStyle],
           ] as const).map(([label, kind, value, setter], index) => <label className={index === 2 ? "wide" : ""} key={kind}><span className="label-with-action">{label}<button type="button" onClick={() => { setOptionKind(kind); setNewOption(""); }}><SlidersHorizontal size={13} />管理选项</button></span><select value={value} onChange={(event) => setter(event.target.value)}>{optionValues(kind).map((item) => <option key={item.id}>{item.label}</option>)}</select></label>)}</div>
@@ -192,7 +266,7 @@ export default function Home() {
           {artifacts.length > 0 && !allConfirmed && <p className="regenerate-note">重新生成会创建新版本，并将全部材料恢复为待确认。</p>}{busy && <div className="progress"><span style={{ width: `${progress}%` }} /></div>}
         </section>
         <section className="results-panel">
-          <div className="results-head"><div><p className="eyebrow">PREPARATION PACK</p><h2>{selected?.name || "尚未选择客户"}</h2></div><div className="export-actions"><button onClick={() => exportFile("docx")} disabled={!allConfirmed}><FileDown size={16} />Word</button><button onClick={() => exportFile("pdf")} disabled={!allConfirmed}><FileDown size={16} />PDF</button></div></div>
+          <div className="results-head"><div><p className="eyebrow">PREPARATION PACK</p><h2>{selected?.name || "尚未选择客户"}</h2>{selected && <span className={`pack-identity ${identity?.verification_status || "missing"}`}>{identity?.verification_status === "verified" ? "主体已核实" : identity?.verification_status === "unverified" ? "主体未核实" : "主体待识别"}</span>}</div><div className="export-actions"><button onClick={() => exportFile("docx")} disabled={!allConfirmed}><FileDown size={16} />Word</button><button onClick={() => exportFile("pdf")} disabled={!allConfirmed}><FileDown size={16} />PDF</button></div></div>
           <div className="step-strip">{artifactOrder.map((type, index) => { const item = artifacts.find((entry) => entry.type === type); return <div className={item?.confirmed ? "step done" : item ? "step ready" : "step"} key={type}><span>{item?.confirmed ? <Check className="step-check" size={14} strokeWidth={2.4} /> : index + 1}</span><small>{stepLabels[type]}</small>{index < 4 && <ChevronRight size={14} />}</div>; })}</div>
           {!artifacts.length ? <div className="empty-state"><div className="empty-orbit"><Search size={28} /></div><h3>从客户信息开始准备</h3><p>系统会依次完成客户摸底、需求拆解、能力匹配、方案与话术生成。</p></div> : <div className="artifact-list">{artifactOrder.map((type) => {
             const item = artifacts.find((entry) => entry.type === type); if (!item) return null; const editing = editingId === item.id;
@@ -206,6 +280,7 @@ export default function Home() {
     </section>
     {deleteOpen && selected && <div className="modal-mask"><div className="modal-card"><header><h3>彻底删除客户</h3><button onClick={() => setDeleteOpen(false)}><X size={18} /></button></header><p>将删除客户、五类成果、任务历史、导出记录及对应 Word/PDF 文件，此操作不可恢复。</p><label>输入完整客户名称确认<input autoFocus value={deleteName} onChange={(event) => setDeleteName(event.target.value)} placeholder={selected.name} /></label><div className="modal-actions"><button className="secondary" onClick={() => setDeleteOpen(false)}>取消</button><button className="danger-button" disabled={deleteName !== selected.name || busy} onClick={() => void deleteCustomer()}>确认彻底删除</button></div></div></div>}
     {optionKind && <div className="modal-mask"><div className="modal-card option-manager"><header><div><small>共享工作空间</small><h3>管理{optionLabels[optionKind]}</h3></div><button onClick={() => setOptionKind(null)}><X size={18} /></button></header><div className="option-create"><input value={newOption} maxLength={50} onChange={(event) => setNewOption(event.target.value)} placeholder="输入自定义选项" /><button className="confirm" disabled={!newOption.trim()} onClick={() => void addOption()}><Plus size={14} />添加</button></div><div className="option-list">{optionValues(optionKind).map((item) => <div key={item.id}><span>{item.label}</span>{item.is_builtin ? <small>默认项</small> : <button onClick={() => void removeOption(item)}><Trash2 size={14} />删除</button>}</div>)}</div></div></div>}
+    {resolutionTarget && <div className="modal-mask"><div className="modal-card resolution-modal"><header><div><small>组织主体消歧</small><h3>选择最可信的主体</h3></div><button onClick={() => setResolutionTarget(null)}><X size={18} /></button></header><p>输入名称：{resolutionEntered}。联网仅执行这一轮综合查询，最多展示 3 个候选。</p>{resolutionBusy ? <div className="resolution-loading"><LoaderCircle className="spin" size={20} />正在核对权威公开来源…</div> : <div className="candidate-list">{candidates.map((candidate) => <button key={`${candidate.canonical_name}-${candidate.registration_code || "none"}`} onClick={() => void chooseIdentity(candidate)}><span className={`confidence ${candidate.confidence}`}>{candidate.confidence === "high" ? "高可信" : candidate.confidence === "medium" ? "中可信" : "低可信"}</span><strong>{candidate.canonical_name}</strong><small>{candidate.entity_type} · {candidate.region} · {candidate.industry}</small><small>{candidate.match_reasons.join("、")} · 匹配分 {candidate.score}</small><em>{candidate.evidence.length} 个公开来源</em></button>)}{!candidates.length && <p className="candidate-empty">未找到可可靠辨认的候选，可沿用输入名称并标记为未核实。</p>}</div>}<button className="secondary use-entered" disabled={resolutionBusy} onClick={() => void chooseIdentity()}>都不是，沿用输入名称（未核实）</button></div></div>}
     <SourceDrawer source={source} onClose={() => setSource(null)} />
   </main>;
 }
