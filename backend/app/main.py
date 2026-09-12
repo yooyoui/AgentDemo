@@ -214,6 +214,8 @@ async def resolve_organization(payload: OrganizationResolveRequest, db: Session 
         raise HTTPException(exc.status_code, str(exc)) from exc
     except LLMCallError as exc:
         raise HTTPException(502, safe_error(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(500, f"主体识别失败：{safe_error(exc)}") from exc
     return OrganizationResolveRead(candidates=candidates, cache_hit=cache_hit, auto_selected_index=auto_selected, searched_at=datetime.now(timezone.utc))
 
 

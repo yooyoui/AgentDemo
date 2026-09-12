@@ -17,8 +17,14 @@ export type CustomerSearchResult = { customer: Customer; score: number; match_re
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`${API_URL}${path}`, init);
   if (!response.ok) {
-    const payload = await response.json().catch(() => ({}));
-    throw new Error(payload.detail || "请求失败，请稍后重试");
+    const raw = await response.text().catch(() => "");
+    let message = "";
+    try {
+      const payload = raw ? JSON.parse(raw) as { detail?: unknown } : {};
+      if (typeof payload.detail === "string") message = payload.detail;
+      else if (Array.isArray(payload.detail)) message = payload.detail.map((item) => item && typeof item === "object" && "msg" in item ? String(item.msg) : String(item)).join("；");
+    } catch { /* A proxy may return an HTML/plain-text error page. */ }
+    throw new Error(message || `请求失败（HTTP ${response.status}），请稍后重试`);
   }
   if (response.status === 204) return undefined as T;
   return response.json() as Promise<T>;
