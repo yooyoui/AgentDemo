@@ -8,7 +8,7 @@ from fastapi.testclient import TestClient
 
 from app.main import app
 from app.services.agent import public_research
-from app.services.search import WebSearchError, search_web, settings
+from app.services.search import SearchResults, WebSearchError, search_web, settings
 
 
 class FakeClient:
@@ -50,12 +50,22 @@ class SearchServiceTests(unittest.IsolatedAsyncioTestCase):
         self.original_base_url = settings.llm_base_url
         self.original_search_model = settings.llm_search_model
         self.original_retries = settings.llm_max_retries
+        self.original_tavily_key = settings.tavily_api_key
+        self.original_tavily_base_url = settings.tavily_base_url
+        self.original_tavily_depth = settings.tavily_search_depth
+        self.original_tavily_retries = settings.tavily_max_retries
+        self.original_tavily_fallback = settings.tavily_fallback_to_deepseek
         self.original_environment = settings.app_environment
         self.original_external_enabled = settings.external_data_transmission_enabled
         settings.llm_api_key = "test-deepseek-key"
         settings.llm_base_url = "https://api.deepseek.com"
         settings.llm_search_model = "deepseek-v4-pro"
         settings.llm_max_retries = 0
+        settings.tavily_api_key = ""
+        settings.tavily_base_url = "https://api.tavily.com"
+        settings.tavily_search_depth = "fast"
+        settings.tavily_max_retries = 0
+        settings.tavily_fallback_to_deepseek = True
         settings.app_environment = "development"
 
     def tearDown(self):
@@ -63,6 +73,11 @@ class SearchServiceTests(unittest.IsolatedAsyncioTestCase):
         settings.llm_base_url = self.original_base_url
         settings.llm_search_model = self.original_search_model
         settings.llm_max_retries = self.original_retries
+        settings.tavily_api_key = self.original_tavily_key
+        settings.tavily_base_url = self.original_tavily_base_url
+        settings.tavily_search_depth = self.original_tavily_depth
+        settings.tavily_max_retries = self.original_tavily_retries
+        settings.tavily_fallback_to_deepseek = self.original_tavily_fallback
         settings.app_environment = self.original_environment
         settings.external_data_transmission_enabled = self.original_external_enabled
 
@@ -84,6 +99,76 @@ class SearchServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sent["json"]["tool_choice"], "auto")
         self.assertEqual(sent["json"]["reasoning"], {"effort": "none"})
         self.assertEqual(sent["json"]["text"]["format"], {"type": "json_object"})
+        self.assertEqual(results.provider, "deepseek")
+
+    async def test_tavily_is_preferred_and_normalizes_deduplicated_results(self):
+        settings.tavily_api_key = "test-tavily-key"
+        tavily = response(200, {"results": [
+            {"title": "企业官网", "url": "https://example.com/about", "content": "企业公开介绍", "published_date": "2026-09-01"},
+            {"title": "重复网页", "url": "https://example.com/about", "content": "重复内容"},
+            {"title": "无效链接", "url": "file:///secret", "content": "无效"},
+        ]})
+        client = FakeClient(tavily)
+
+        results = await search_web(" 示例企业 ", max_results=5, client=client)
+
+        self.assertEqual(results.provider, "tavily")
+        self.assertEqual(len(results), 1)
+        url, sent = client.calls[0]
+        self.assertEqual(url, "https://api.tavily.com/search")
+        self.assertEqual(sent["headers"]["Authorization"], "Bearer test-tavily-key")
+        self.assertEqual(sent["json"]["query"], "示例企业")
+        self.assertEqual(sent["json"]["search_depth"], "fast")
+        self.assertEqual(sent["json"]["country"], "china")
+        self.assertFalse(sent["json"]["include_raw_content"])
+
+    async def test_tavily_failure_falls_back_to_deepseek_pro(self):
+        settings.tavily_api_key = "test-tavily-key"
+        client = FakeClient([
+            response(500, {}),
+            search_response([{"title": "兜底结果", "url": "https://example.com/fallback", "content": "摘要"}]),
+        ])
+
+        results = await search_web("示例查询", client=client)
+
+        self.assertEqual(results.provider, "deepseek")
+        self.assertEqual(results[0]["title"], "兜底结果")
+        self.assertEqual(len(client.calls), 2)
+        self.assertEqual(client.calls[0][0], "https://api.tavily.com/search")
+        self.assertEqual(client.calls[1][0], "https://api.deepseek.com/responses")
+
+    async def test_empty_tavily_results_fall_back_without_business_requery(self):
+        settings.tavily_api_key = "test-tavily-key"
+        client = FakeClient([
+            response(200, {"results": []}),
+            search_response([{"title": "兜底结果", "url": "https://example.com/fallback", "content": "摘要"}]),
+        ])
+
+        results = await search_web("同一条综合查询", client=client)
+
+        self.assertEqual(results.provider, "deepseek")
+        self.assertEqual(client.calls[0][1]["json"]["query"], "同一条综合查询")
+        self.assertEqual(client.calls[1][1]["json"]["input"], "同一条综合查询")
+
+    async def test_tavily_can_disable_deepseek_fallback(self):
+        settings.tavily_api_key = "test-tavily-key"
+        settings.tavily_fallback_to_deepseek = False
+        client = FakeClient(response(401, {}))
+
+        with self.assertRaisesRegex(WebSearchError, "Tavily 联网搜索鉴权失败"):
+            await search_web("示例查询", client=client)
+        self.assertEqual(len(client.calls), 1)
+
+    async def test_tavily_works_without_deepseek_key(self):
+        settings.tavily_api_key = "test-tavily-key"
+        settings.llm_api_key = ""
+        client = FakeClient(response(200, {"results": [
+            {"title": "公开信息", "url": "https://example.com", "content": "摘要"}
+        ]}))
+
+        results = await search_web("示例查询", client=client)
+
+        self.assertEqual(results.provider, "tavily")
 
     async def test_missing_key_fails_without_calling_upstream(self):
         settings.llm_api_key = ""
@@ -203,7 +288,10 @@ class SearchApiTests(unittest.TestCase):
         self.client = TestClient(app)
 
     def test_search_endpoint_returns_structured_results(self):
-        result = [{"title": "示例结果", "url": "https://example.com/page", "content": "摘要", "published_date": None}]
+        result = SearchResults(
+            [{"title": "示例结果", "url": "https://example.com/page", "content": "摘要", "published_date": None}],
+            provider="deepseek",
+        )
         with patch("app.main.search_web", new=AsyncMock(return_value=result)) as mocked:
             response_value = self.client.post("/api/search", json={"query": " 政企数字化 ", "max_results": 3})
         self.assertEqual(response_value.status_code, 200)
@@ -212,6 +300,29 @@ class SearchApiTests(unittest.TestCase):
         self.assertEqual(body["query"], "政企数字化")
         self.assertEqual(body["results"][0]["url"], "https://example.com/page")
         mocked.assert_awaited_once_with("政企数字化", 3)
+
+    def test_search_endpoint_reports_actual_fallback_provider(self):
+        result = SearchResults(
+            [{"title": "兜底结果", "url": "https://example.com/page", "content": "摘要", "published_date": None}],
+            provider="deepseek",
+        )
+        with patch("app.main.search_web", new=AsyncMock(return_value=result)):
+            response_value = self.client.post("/api/search", json={"query": "政企数字化"})
+        self.assertEqual(response_value.status_code, 200)
+        self.assertEqual(response_value.json()["provider"], "deepseek")
+
+    def test_health_reports_tavily_and_deepseek_fallback_without_keys(self):
+        with (
+            patch.object(settings, "tavily_api_key", "test-tavily-key"),
+            patch.object(settings, "llm_api_key", "test-deepseek-key"),
+            patch.object(settings, "tavily_search_depth", "fast"),
+            patch.object(settings, "tavily_fallback_to_deepseek", True),
+        ):
+            response_value = self.client.get("/api/health")
+        body = response_value.json()
+        self.assertEqual(body["research"], "tavily")
+        self.assertEqual(body["research_model"], "fast")
+        self.assertEqual(body["research_fallback"], "deepseek-v4-pro")
 
     def test_search_endpoint_validates_input(self):
         response_value = self.client.post("/api/search", json={"query": " ", "max_results": 11})

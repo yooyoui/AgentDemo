@@ -3,8 +3,10 @@ from html import escape
 from pathlib import Path
 
 from docx import Document
+from docx.enum.table import WD_CELL_VERTICAL_ALIGNMENT
+from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
-from docx.shared import Pt
+from docx.shared import Mm, Pt
 from reportlab.lib.enums import TA_CENTER
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
@@ -16,6 +18,61 @@ from reportlab.platypus import KeepTogether, PageBreak, Paragraph, SimpleDocTemp
 
 
 SECTION_NAMES = {"research": "客户摸底", "requirements": "需求拆解", "capabilities": "能力匹配", "solution": "初步方案", "script": "拜访话术"}
+
+DOCX_BODY_EAST_ASIA_FONT = "宋体"
+DOCX_HEADING_EAST_ASIA_FONT = "微软雅黑"
+DOCX_LATIN_FONT = "Arial"
+
+
+def _set_docx_style_font(style, east_asia_font: str, size: float, *, bold: bool = False) -> None:
+    """Set explicit Latin and East Asian fonts so Word does not fall back to MS Gothic."""
+    style.font.name = DOCX_LATIN_FONT
+    style.font.size = Pt(size)
+    style.font.bold = bold
+    r_fonts = style._element.get_or_add_rPr().get_or_add_rFonts()
+    r_fonts.set(qn("w:ascii"), DOCX_LATIN_FONT)
+    r_fonts.set(qn("w:hAnsi"), DOCX_LATIN_FONT)
+    r_fonts.set(qn("w:eastAsia"), east_asia_font)
+    r_fonts.set(qn("w:cs"), DOCX_LATIN_FONT)
+    for attribute in ("asciiTheme", "hAnsiTheme", "eastAsiaTheme", "cstheme"):
+        r_fonts.attrib.pop(qn(f"w:{attribute}"), None)
+
+
+def _configure_docx_typography(doc: Document) -> None:
+    _set_docx_style_font(doc.styles["Normal"], DOCX_BODY_EAST_ASIA_FONT, 10.5)
+    _set_docx_style_font(doc.styles["List Bullet"], DOCX_BODY_EAST_ASIA_FONT, 10.5)
+    _set_docx_style_font(doc.styles["Title"], DOCX_HEADING_EAST_ASIA_FONT, 22, bold=True)
+    _set_docx_style_font(doc.styles["Heading 1"], DOCX_HEADING_EAST_ASIA_FONT, 16, bold=True)
+    _set_docx_style_font(doc.styles["Heading 2"], DOCX_HEADING_EAST_ASIA_FONT, 12, bold=True)
+
+
+def _set_repeat_table_header(row) -> None:
+    tr_pr = row._tr.get_or_add_trPr()
+    marker = OxmlElement("w:tblHeader")
+    marker.set(qn("w:val"), "true")
+    tr_pr.append(marker)
+
+
+def _prevent_table_row_split(row) -> None:
+    row._tr.get_or_add_trPr().append(OxmlElement("w:cantSplit"))
+
+
+def _format_docx_table(table, column_widths) -> None:
+    table.autofit = False
+    for row in table.rows:
+        _prevent_table_row_split(row)
+        for cell, width in zip(row.cells, column_widths):
+            cell.width = width
+            cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
+    _set_repeat_table_header(table.rows[0])
+    for cell in table.rows[0].cells:
+        shading = OxmlElement("w:shd")
+        shading.set(qn("w:fill"), "D9EEF2")
+        cell._tc.get_or_add_tcPr().append(shading)
+        for paragraph in cell.paragraphs:
+            paragraph.paragraph_format.keep_with_next = True
+            for run in paragraph.runs:
+                run.bold = True
 
 
 def _lines(value, depth=0):
@@ -35,14 +92,111 @@ def _lines(value, depth=0):
     return lines
 
 
+def _add_docx_list(doc: Document, values) -> None:
+    for value in values or []:
+        doc.add_paragraph(str(value), style="List Bullet")
+
+
+def _add_docx_labeled_paragraph(doc: Document, label: str, value) -> None:
+    paragraph = doc.add_paragraph()
+    paragraph.add_run(f"{label}：").bold = True
+    paragraph.add_run(str(value if value not in (None, "") else "待补充"))
+
+
+def _unique_citations(citations):
+    unique = []
+    seen = set()
+    for citation in citations or []:
+        identity = (
+            citation.get("document_id")
+            or citation.get("url")
+            or citation.get("filename")
+            or citation.get("title")
+            or str(citation)
+        )
+        if identity in seen:
+            continue
+        seen.add(identity)
+        unique.append(citation)
+    return unique
+
+
+def _add_docx_citations(doc: Document, citations) -> None:
+    citations = _unique_citations(citations)
+    if not citations:
+        return
+    doc.add_heading("引用来源", level=2)
+    for citation in citations:
+        source = citation.get("title") or citation.get("filename") or "内部资料"
+        location = citation.get("url") or citation.get("filename") or ""
+        text = source if not location or location == source else f"{source}  {location}"
+        doc.add_paragraph(text)
+
+
+def _add_docx_requirements(doc: Document, content: dict) -> None:
+    for key in ("显性需求", "隐性痛点", "建设期望", "关注事项", "待确认问题", "原文依据"):
+        values = content.get(key, [])
+        if values:
+            doc.add_heading(key, level=2)
+            _add_docx_list(doc, values)
+
+
+def _add_docx_capabilities(doc: Document, content: dict) -> None:
+    matches = content.get("匹配结果", [])
+    if not matches:
+        doc.add_paragraph(content.get("提示") or "当前没有可引用的内部能力依据。")
+        return
+    for index, match in enumerate(matches, 1):
+        doc.add_heading(f"{index}. {match.get('能力', '待确认能力')}", level=2)
+        _add_docx_labeled_paragraph(doc, "类别", match.get("类别", "未分类"))
+        _add_docx_labeled_paragraph(doc, "匹配理由", match.get("匹配理由"))
+        _add_docx_labeled_paragraph(doc, "适用条件", match.get("适用条件"))
+        _add_docx_labeled_paragraph(doc, "内部资料原文", match.get("引用"))
+    if content.get("提示"):
+        doc.add_heading("补充说明", level=2)
+        doc.add_paragraph(str(content["提示"]))
+
+
+def _add_docx_solution(doc: Document, content: dict) -> None:
+    if content.get("客户现状"):
+        doc.add_heading("客户现状", level=2)
+        doc.add_paragraph(str(content["客户现状"]))
+    for key in ("建设目标", "方案组合", "建设思路", "预期价值", "风险边界"):
+        values = content.get(key, [])
+        if values:
+            doc.add_heading(key, level=2)
+            _add_docx_list(doc, values)
+
+
+def _add_docx_script(doc: Document, content: dict) -> None:
+    settings = content.get("拜访设置", {})
+    if settings:
+        doc.add_heading("拜访设置", level=2)
+        table = doc.add_table(rows=2, cols=3)
+        table.style = "Table Grid"
+        labels = ("拜访类型", "客户角色", "表达风格")
+        keys = ("类型", "客户角色", "表达风格")
+        for cell, label in zip(table.rows[0].cells, labels):
+            cell.text = label
+        for cell, key in zip(table.rows[1].cells, keys):
+            cell.text = str(settings.get(key, "待补充"))
+        _format_docx_table(table, (Mm(57), Mm(57), Mm(57)))
+    for index, stage in enumerate(content.get("阶段", []), 1):
+        doc.add_heading(f"{index}. {stage.get('名称', f'阶段 {index}')}", level=2)
+        _add_docx_labeled_paragraph(doc, "沟通目标", stage.get("目标"))
+        _add_docx_labeled_paragraph(doc, "推荐表达", stage.get("推荐表达"))
+        if stage.get("问题"):
+            paragraph = doc.add_paragraph()
+            paragraph.add_run("建议提问：").bold = True
+            _add_docx_list(doc, stage["问题"])
+    if content.get("禁止承诺"):
+        doc.add_heading("风险与禁止承诺", level=2)
+        _add_docx_list(doc, content["禁止承诺"])
+
+
 def export_docx(path: Path, customer_name: str, artifacts) -> None:
     doc = Document()
-    styles = doc.styles
-    for style_name in ["Normal", "Title", "Heading 1", "Heading 2"]:
-        style = styles[style_name]
-        style.font.name = "Arial"
-        style.font.size = Pt(11 if style_name == "Normal" else 16)
-        style._element.rPr.rFonts.set(qn("w:eastAsia"), "微软雅黑")
+    _configure_docx_typography(doc)
     title = doc.add_paragraph(style="Title")
     title.alignment = 1
     title.add_run(f"{customer_name}拜访准备材料")
@@ -63,6 +217,7 @@ def export_docx(path: Path, customer_name: str, artifacts) -> None:
                     cells[0].text = str(fact.get("label", "信息项"))
                     cells[1].text = str(fact.get("value", "待补充"))
                     cells[2].text = str(fact.get("status") or fact.get("confidence") or "待核实")
+                _format_docx_table(table, (Mm(32), Mm(112), Mm(28)))
                 edited = [fact for fact in facts if fact.get("edit_history")]
                 if edited:
                     doc.add_heading("人工修改记录", level=2)
@@ -81,16 +236,18 @@ def export_docx(path: Path, customer_name: str, artifacts) -> None:
                     doc.add_heading(key, level=2)
                     for value in values:
                         doc.add_paragraph(str(value), style="List Bullet")
+        elif artifact.type.value == "requirements":
+            _add_docx_requirements(doc, artifact.content)
+        elif artifact.type.value == "capabilities":
+            _add_docx_capabilities(doc, artifact.content)
+        elif artifact.type.value == "solution":
+            _add_docx_solution(doc, artifact.content)
+        elif artifact.type.value == "script":
+            _add_docx_script(doc, artifact.content)
         else:
             for depth, line in _lines(artifact.content):
-                if depth == 0 and not line.startswith("•"):
-                    doc.add_heading(line, level=2)
-                else:
-                    doc.add_paragraph(line, style="List Bullet" if line.startswith("•") else None)
-        if artifact.citations:
-            doc.add_heading("引用来源", level=2)
-            for citation in artifact.citations:
-                doc.add_paragraph(f"{citation.get('title', '资料')}  {citation.get('url', citation.get('filename', ''))}")
+                doc.add_paragraph(line, style="List Bullet" if line.startswith("•") else None)
+        _add_docx_citations(doc, artifact.citations)
     doc.save(path)
 
 
@@ -320,9 +477,10 @@ def export_pdf(path: Path, customer_name: str, artifacts) -> None:
             story.extend(script_content(artifact.content))
         else:
             story.append(key_value_rows(artifact.content))
-        if artifact.citations:
+        citations = _unique_citations(artifact.citations)
+        if citations:
             story.extend([Spacer(1, 6*mm), p("引用来源", h3)])
-            for citation in artifact.citations:
+            for citation in citations:
                 source = citation.get("title") or citation.get("filename") or "内部资料"
                 location = citation.get("url") or f"内部知识库 / {citation.get('category', '未分类')}"
                 story.append(p(f"{source}　{location}", small))

@@ -22,6 +22,12 @@ class Settings(BaseSettings):
     llm_timeout_seconds: int = 90
     llm_max_tokens: int = 4096
     llm_max_retries: int = 2
+    tavily_api_key: str = ""
+    tavily_base_url: str = "https://api.tavily.com"
+    tavily_search_depth: str = "fast"
+    tavily_timeout_seconds: int = 20
+    tavily_max_retries: int = 1
+    tavily_fallback_to_deepseek: bool = True
     embedding_model: str = "text-embedding-3-small"
     cors_origins: str = "http://localhost:3000,http://localhost:3001"
     model_config = SettingsConfigDict(env_file=PROJECT_ROOT / ".env", extra="ignore")

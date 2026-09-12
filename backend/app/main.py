@@ -110,7 +110,7 @@ def active_prompt(db: Session, task_type: str) -> tuple[str, str]:
 
 def safe_error(exc: Exception) -> str:
     message = str(exc) or exc.__class__.__name__
-    for secret in (settings.llm_api_key,):
+    for secret in (settings.llm_api_key, settings.tavily_api_key):
         if secret:
             message = message.replace(secret, "[已隐藏]")
     return message[:1000]
@@ -131,13 +131,26 @@ def seed_prompts():
 
 @app.get("/api/health")
 def health():
+    if settings.tavily_api_key:
+        research_provider = "tavily"
+        research_model = settings.tavily_search_depth
+        research_fallback = settings.llm_search_model if settings.tavily_fallback_to_deepseek and settings.llm_api_key else None
+    elif settings.llm_api_key:
+        research_provider = "deepseek-web"
+        research_model = settings.llm_search_model
+        research_fallback = None
+    else:
+        research_provider = "demo"
+        research_model = "demo-rules"
+        research_fallback = None
     return {
         "status": "ok",
         "provider": "deepseek" if settings.llm_api_key else "demo",
         "model": settings.llm_model if settings.llm_api_key else "demo-rules",
         "model_status": "configured" if settings.llm_api_key else "demo",
-        "research": "deepseek-web" if settings.llm_api_key else "demo",
-        "research_model": settings.llm_search_model if settings.llm_api_key else "demo-rules",
+        "research": research_provider,
+        "research_model": research_model,
+        "research_fallback": research_fallback,
         "external_data_transmission": "enabled" if settings.external_calls_allowed else "blocked",
     }
 
@@ -159,7 +172,12 @@ async def internet_search(payload: WebSearchRequest):
         results = await search_web(payload.query, payload.max_results)
     except WebSearchError as exc:
         raise HTTPException(exc.status_code, str(exc)) from exc
-    return WebSearchRead(query=payload.query, results=results, searched_at=datetime.now(timezone.utc))
+    return WebSearchRead(
+        provider=getattr(results, "provider", "tavily" if settings.tavily_api_key else "deepseek"),
+        query=payload.query,
+        results=results,
+        searched_at=datetime.now(timezone.utc),
+    )
 
 
 @app.get("/api/customers", response_model=list[CustomerRead])

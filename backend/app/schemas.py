@@ -196,7 +196,7 @@ class WebSearchItem(BaseModel):
 
 
 class WebSearchRead(BaseModel):
-    provider: Literal["deepseek"] = "deepseek"
+    provider: Literal["tavily", "deepseek"] = "deepseek"
     query: str
     results: list[WebSearchItem]
     searched_at: datetime

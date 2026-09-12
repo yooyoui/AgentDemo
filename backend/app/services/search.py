@@ -17,6 +17,12 @@ class WebSearchError(RuntimeError):
         self.retryable = retryable
 
 
+class SearchResults(list):
+    def __init__(self, values=(), provider: str = "deepseek"):
+        super().__init__(values)
+        self.provider = provider
+
+
 def _valid_public_url(value: object) -> bool:
     if not isinstance(value, str):
         return False
@@ -75,12 +81,32 @@ def _parse_output_results(text: str) -> list:
     raise ValueError("missing results")
 
 
-async def _request_search(client: httpx.AsyncClient, request: dict, max_results: int) -> list[dict]:
+def _normalize_results(raw_results: list, max_results: int, provider: str) -> SearchResults:
+    results = []
+    seen_urls = set()
+    for item in raw_results:
+        if not isinstance(item, dict) or not _valid_public_url(item.get("url")):
+            continue
+        url = item["url"].strip()
+        if url in seen_urls:
+            continue
+        seen_urls.add(url)
+        results.append({
+            "title": str(item.get("title") or "公开网页")[:300],
+            "url": url,
+            "content": str(item.get("content") or "")[:4000],
+            "published_date": str(item["published_date"])[:100] if item.get("published_date") else None,
+        })
+    return SearchResults(results[:max_results], provider=provider)
+
+
+async def _request_deepseek_search(client: httpx.AsyncClient, request: dict, max_results: int) -> SearchResults:
     try:
         response = await client.post(
             f"{settings.llm_base_url.rstrip('/')}/responses",
             headers={"Authorization": f"Bearer {settings.llm_api_key}"},
             json=request,
+            timeout=settings.llm_timeout_seconds,
         )
     except httpx.TimeoutException as exc:
         raise WebSearchError("DeepSeek 联网搜索响应超时", 504, retryable=True) from exc
@@ -112,24 +138,54 @@ async def _request_search(client: httpx.AsyncClient, request: dict, max_results:
     except (json.JSONDecodeError, ValueError) as exc:
         raise WebSearchError("DeepSeek 联网搜索结果格式不正确", 502, retryable=True) from exc
 
-    results = []
-    for item in raw_results:
-        if not isinstance(item, dict) or not _valid_public_url(item.get("url")):
-            continue
-        results.append({
-            "title": str(item.get("title") or "公开网页")[:300],
-            "url": item["url"],
-            "content": str(item.get("content") or "")[:4000],
-            "published_date": str(item["published_date"])[:100] if item.get("published_date") else None,
-        })
-    return results[:max_results]
+    return _normalize_results(raw_results, max_results, "deepseek")
 
 
-async def search_web(query: str, max_results: int = 5, client: httpx.AsyncClient | None = None) -> list[dict]:
+async def _request_tavily_search(client: httpx.AsyncClient, query: str, max_results: int) -> SearchResults:
+    try:
+        response = await client.post(
+            f"{settings.tavily_base_url.rstrip('/')}/search",
+            headers={"Authorization": f"Bearer {settings.tavily_api_key}"},
+            json={
+                "query": query,
+                "topic": "general",
+                "search_depth": settings.tavily_search_depth,
+                "max_results": max_results,
+                "country": "china",
+                "include_answer": False,
+                "include_raw_content": False,
+            },
+            timeout=settings.tavily_timeout_seconds,
+        )
+    except httpx.TimeoutException as exc:
+        raise WebSearchError("Tavily 联网搜索响应超时", 504, retryable=True) from exc
+    except httpx.RequestError as exc:
+        raise WebSearchError("无法连接 Tavily 联网搜索服务", 502, retryable=True) from exc
+
+    if response.status_code in {401, 403}:
+        raise WebSearchError("Tavily 联网搜索鉴权失败，请检查后端 API Key", 502)
+    if response.status_code == 429:
+        raise WebSearchError("Tavily 联网搜索请求过于频繁或余额不足", 429, retryable=True)
+    if response.status_code >= 500:
+        raise WebSearchError("Tavily 联网搜索服务暂时不可用", 502, retryable=True)
+    if response.status_code >= 400:
+        raise WebSearchError(f"Tavily 联网搜索请求失败（HTTP {response.status_code}）", 502)
+    try:
+        body = response.json()
+    except ValueError as exc:
+        raise WebSearchError("Tavily 联网搜索返回了无效数据", 502, retryable=True) from exc
+    raw_results = body.get("results")
+    if not isinstance(raw_results, list):
+        raise WebSearchError("Tavily 联网搜索结果格式不正确", 502, retryable=True)
+    results = _normalize_results(raw_results, max_results, "tavily")
+    if not results:
+        raise WebSearchError("Tavily 联网搜索未返回有效结果", 502)
+    return results
+
+
+async def _search_deepseek(client: httpx.AsyncClient, query: str, max_results: int) -> SearchResults:
     if not settings.llm_api_key:
-        raise WebSearchError("尚未配置 LLM_API_KEY，DeepSeek 联网搜索不可用", 503)
-    if not settings.external_calls_allowed:
-        raise WebSearchError("生产环境尚未明确启用外部数据传输", 403)
+        raise WebSearchError("尚未配置 LLM_API_KEY，DeepSeek 联网搜索兜底不可用", 503)
 
     request = {
         "model": settings.llm_search_model,
@@ -150,20 +206,45 @@ async def search_web(query: str, max_results: int = 5, client: httpx.AsyncClient
         "text": {"format": {"type": "json_object"}},
         "max_output_tokens": min(settings.llm_max_tokens, 4096),
     }
+    last_error = WebSearchError("DeepSeek 联网搜索失败", 502)
+    for attempt in range(settings.llm_max_retries + 1):
+        try:
+            return await _request_deepseek_search(client, request, max_results)
+        except WebSearchError as exc:
+            last_error = exc
+            if not exc.retryable or attempt >= settings.llm_max_retries:
+                raise
+            await asyncio.sleep(0.4 * (attempt + 1))
+    raise last_error
+
+
+async def search_web(query: str, max_results: int = 5, client: httpx.AsyncClient | None = None) -> list[dict]:
+    if not settings.tavily_api_key and not settings.llm_api_key:
+        raise WebSearchError("尚未配置 TAVILY_API_KEY 或 LLM_API_KEY，联网搜索不可用", 503)
+    if not settings.external_calls_allowed:
+        raise WebSearchError("生产环境尚未明确启用外部数据传输", 403)
+
     owns_client = client is None
     if client is None:
-        client = httpx.AsyncClient(timeout=settings.llm_timeout_seconds)
+        client = httpx.AsyncClient()
     try:
-        last_error = WebSearchError("DeepSeek 联网搜索失败", 502)
-        for attempt in range(settings.llm_max_retries + 1):
-            try:
-                return await _request_search(client, request, max_results)
-            except WebSearchError as exc:
-                last_error = exc
-                if not exc.retryable or attempt >= settings.llm_max_retries:
-                    raise
-                await asyncio.sleep(0.4 * (attempt + 1))
-        raise last_error
+        tavily_error = None
+        if settings.tavily_api_key:
+            for attempt in range(settings.tavily_max_retries + 1):
+                try:
+                    return await _request_tavily_search(client, query.strip(), max_results)
+                except WebSearchError as exc:
+                    tavily_error = exc
+                    if not exc.retryable or attempt >= settings.tavily_max_retries:
+                        break
+                    await asyncio.sleep(0.25 * (attempt + 1))
+            if not settings.tavily_fallback_to_deepseek:
+                raise tavily_error
+        if settings.llm_api_key:
+            return await _search_deepseek(client, query, max_results)
+        if tavily_error:
+            raise WebSearchError(f"{tavily_error}；DeepSeek 兜底未配置", tavily_error.status_code)
+        raise WebSearchError("联网搜索服务未配置", 503)
     finally:
         if owns_client:
             await client.aclose()
