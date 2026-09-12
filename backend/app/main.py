@@ -16,7 +16,7 @@ from .config import get_settings
 from .database import Base, SessionLocal, engine, get_db
 from .models import Artifact, ArtifactType, Customer, EntityResolutionCache, ExportArtifact, GenerationTask, KnowledgeDocument, OrganizationIdentity, PromptTemplate, WorkspaceOption
 from .schemas import AnalyzeRequest, ArtifactRead, ArtifactUpdate, CustomerCreate, CustomerDeleteRequest, CustomerRead, CustomerSearchResult, KnowledgeRead, ModelTestRead, OrganizationIdentityConfirm, OrganizationIdentityRead, OrganizationResolveRead, OrganizationResolveRequest, PromptRead, PromptUpdate, TaskRead, WebSearchRead, WebSearchRequest, WorkspaceOptionCreate, WorkspaceOptionRead
-from .services.agent import LLMCallError, call_llm, clean_untrusted, demo_capabilities, demo_requirements, demo_script, demo_solution, merge_research_sources, normalize_research_output, preserve_solution_boundaries, public_research, resolve_capability_references, retrieve_knowledge
+from .services.agent import LLMCallError, call_llm, clean_untrusted, demo_capabilities, demo_requirements, demo_script, demo_solution, merge_research_sources, normalize_research_output, preserve_solution_boundaries, public_research, repair_capability_references, retrieve_knowledge
 from .services.artifact_edit import ArtifactEditError, prepare_artifact_update
 from .services.documents import ALLOWED_EXTENSIONS, chunk_text, extract_text
 from .services.entity_resolution import normalize_name, resolve_entities
@@ -508,8 +508,7 @@ async def generate_customer_research(customer: Customer, prompt: str) -> tuple[d
         if not followup_result:
             raise LLMCallError("客户摸底补查结果为空")
         extraction_results.append(followup_result)
-        if followup_result.data.get("客户") != customer.name:
-            raise LLMCallError("客户摸底补查结果中的客户名称不一致")
+        followup_result.data["客户"] = customer.name
         research, metadata = normalize_research_output(followup_result.data, customer, citations)
 
     covered_critical = 4 - len(metadata["critical_missing"])
@@ -580,13 +579,18 @@ async def execute_flow(task_id: str, payload: dict):
                     OUTPUT_EXAMPLES["capabilities"],
                 )
             if capabilities_result:
-                visible_matches, selected_refs = resolve_capability_references(
+                visible_matches, selected_refs, dropped_matches = repair_capability_references(
                     capabilities_result.data.get("匹配结果", []),
                     refs,
                 )
                 capabilities = {"匹配结果": visible_matches}
-                if capabilities_result.data.get("提示"):
-                    capabilities["提示"] = capabilities_result.data["提示"]
+                notices = [capabilities_result.data.get("提示")] if capabilities_result.data.get("提示") else []
+                if dropped_matches:
+                    notices.append(f"已省略 {dropped_matches} 项无法定位内部原文的能力建议")
+                if not visible_matches:
+                    notices.append("暂无可定位内部证据的能力建议")
+                if notices:
+                    capabilities["提示"] = "；".join(notices)
                 capability_citations = selected_refs
                 model_calls["capabilities"] = {"latency_ms": capabilities_result.latency_ms, "attempts": capabilities_result.attempts}
             else:

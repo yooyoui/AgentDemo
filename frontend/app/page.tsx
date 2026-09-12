@@ -10,6 +10,7 @@ type OptionKind = WorkspaceOption["kind"];
 const artifactOrder: Artifact["type"][] = ["research", "requirements", "capabilities", "solution", "script"];
 const stepLabels: Record<string, string> = { research: "客户摸底", requirements: "需求拆解", capabilities: "能力匹配", solution: "初步方案", script: "拜访话术" };
 const optionLabels: Record<OptionKind, string> = { visit_type: "拜访类型", customer_role: "客户角色", style: "表达风格" };
+const progressLabel = (value: number) => value < 8 ? "正在创建任务" : value < 28 ? "客户摸底：联网检索与结构化整理" : value < 48 ? "需求拆解" : value < 66 ? "能力匹配与内部引用校验" : value < 82 ? "初步方案" : value < 100 ? "拜访话术" : "生成完成";
 
 export default function Home() {
   const [view, setView] = useState<View>("workspace");
@@ -262,7 +263,7 @@ export default function Home() {
           <div className="form-grid">{([
             ["拜访类型", "visit_type", visitType, setVisitType], ["客户角色", "customer_role", customerRole, setCustomerRole], ["表达风格", "style", style, setStyle],
           ] as const).map(([label, kind, value, setter], index) => <label className={index === 2 ? "wide" : ""} key={kind}><span className="label-with-action">{label}<button type="button" onClick={() => { setOptionKind(kind); setNewOption(""); }}><SlidersHorizontal size={13} />管理选项</button></span><select value={value} onChange={(event) => setter(event.target.value)}>{optionValues(kind).map((item) => <option key={item.id}>{item.label}</option>)}</select></label>)}</div>
-          <div className="generation-actions"><button className="primary" onClick={runAll} disabled={busy || !selectedId || allConfirmed}>{busy ? <><LoaderCircle className="spin" size={18} />正在生成 {progress}%</> : allConfirmed ? <><Check size={18} />材料已确认，请在右侧导出</> : artifacts.length > 0 ? <><RefreshCw size={18} />重新生成全部材料</> : <><Sparkles size={18} />一键生成拜访材料</>}</button><button className="secondary research-only" onClick={runResearch} disabled={busy || !selectedId}><Search size={16} />仅生成客户摸底</button></div>
+          <div className="generation-actions"><button className="primary" onClick={runAll} disabled={busy || !selectedId || allConfirmed}>{busy ? <><LoaderCircle className="spin" size={18} />{progressLabel(progress)} · {progress}%</> : allConfirmed ? <><Check size={18} />材料已确认，请在右侧导出</> : artifacts.length > 0 ? <><RefreshCw size={18} />重新生成全部材料</> : <><Sparkles size={18} />一键生成拜访材料</>}</button><button className="secondary research-only" onClick={runResearch} disabled={busy || !selectedId}><Search size={16} />仅生成客户摸底</button></div>
           {artifacts.length > 0 && !allConfirmed && <p className="regenerate-note">重新生成会创建新版本，并将全部材料恢复为待确认。</p>}{busy && <div className="progress"><span style={{ width: `${progress}%` }} /></div>}
         </section>
         <section className="results-panel">

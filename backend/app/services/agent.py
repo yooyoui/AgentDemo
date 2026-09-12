@@ -4,6 +4,7 @@ import re
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from difflib import SequenceMatcher
 from typing import Any, TypeVar
 from urllib.parse import urlparse
 
@@ -128,6 +129,60 @@ def resolve_capability_references(matches: list[dict], refs: list[dict]) -> tupl
         selected_refs.append(reference)
 
     return visible_matches, selected_refs
+
+
+def repair_capability_references(matches: list[dict], refs: list[dict]) -> tuple[list[dict], list[dict], int]:
+    """Fail closed per capability while repairing safe paraphrases to verbatim evidence.
+
+    Exact quotes remain unchanged. A paraphrase is replaced only when a sentence
+    from the same cited document has meaningful lexical overlap; otherwise the
+    unsupported capability is omitted instead of failing the whole generation.
+    """
+    refs_by_document: dict[str, list[dict]] = {}
+    for ref in refs:
+        document_id = str(ref.get("document_id") or "")
+        excerpt = ref.get("excerpt")
+        if document_id and isinstance(excerpt, str) and excerpt.strip():
+            refs_by_document.setdefault(document_id, []).append(ref)
+
+    visible: list[dict] = []
+    selected: list[dict] = []
+    dropped = 0
+    for raw_match in matches:
+        match = dict(raw_match)
+        document_id = str(match.pop("document_id", "") or "")
+        quote = str(match.get("引用") or "").strip()
+        candidates = refs_by_document.get(document_id, [])
+        exact = next((ref for ref in candidates if quote and quote in ref["excerpt"]), None)
+        if exact:
+            visible.append(match)
+            selected.append(exact)
+            continue
+
+        query_terms = search_terms(" ".join((quote, str(match.get("能力") or ""), str(match.get("匹配理由") or ""))))
+        best: tuple[float, str, dict] | None = None
+        for ref in candidates:
+            for sentence in re.split(r"(?<=[。！？；])|\n+", ref["excerpt"]):
+                sentence = sentence.strip()
+                if len(sentence) < 8:
+                    continue
+                sentence_terms = search_terms(sentence)
+                overlap = len(query_terms & sentence_terms) / max(1, len(query_terms))
+                similarity = SequenceMatcher(None, normalize_for_match(quote), normalize_for_match(sentence)).ratio() if quote else 0
+                score = max(overlap, similarity)
+                if best is None or score > best[0]:
+                    best = (score, sentence, ref)
+        if best and best[0] >= 0.32:
+            match["引用"] = best[1]
+            visible.append(match)
+            selected.append(best[2])
+        else:
+            dropped += 1
+    return visible, selected, dropped
+
+
+def normalize_for_match(value: str) -> str:
+    return re.sub(r"[\s，。；：、！？,.!?;:'\"（）()\[\]【】]+", "", value).casefold()
 
 
 def _known_customer_value(value: object) -> bool:

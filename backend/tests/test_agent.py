@@ -1,7 +1,7 @@
 import unittest
 from types import SimpleNamespace
 
-from app.services.agent import LLMCallError, clean_untrusted, demo_capabilities, demo_requirements, demo_script, demo_solution, preserve_solution_boundaries, resolve_capability_references, retrieve_knowledge
+from app.services.agent import LLMCallError, clean_untrusted, demo_capabilities, demo_requirements, demo_script, demo_solution, preserve_solution_boundaries, repair_capability_references, resolve_capability_references, retrieve_knowledge
 
 
 class AgentTests(unittest.TestCase):
@@ -97,6 +97,36 @@ class AgentTests(unittest.TestCase):
                 [{"能力": "产品能力", "引用": "模型改写的内容", "document_id": "doc-1"}],
                 refs,
             )
+
+    def test_capability_paraphrase_is_replaced_with_verbatim_sentence(self):
+        refs = [{
+            "document_id": "doc-1", "filename": "协同办公.md",
+            "excerpt": "系统支持项目进度、投标材料、合同与交付信息的统一管理。并支持流程审批。",
+        }]
+        matches = [{
+            "能力": "项目协同管理", "类别": "协同办公", "匹配理由": "统一管理项目材料和进度",
+            "适用条件": "需要接口调研", "引用": "可以集中汇总项目进度、合同和交付信息", "document_id": "doc-1",
+        }]
+        visible, citations, dropped = repair_capability_references(matches, refs)
+        self.assertEqual(dropped, 0)
+        self.assertEqual(visible[0]["引用"], "系统支持项目进度、投标材料、合同与交付信息的统一管理。")
+        self.assertIn(visible[0]["引用"], citations[0]["excerpt"])
+
+    def test_unlocatable_capability_is_dropped_without_wrong_citation(self):
+        refs = [{"document_id": "doc-1", "filename": "云计算.md", "excerpt": "提供弹性计算资源和对象存储服务。"}]
+        matches = [{"能力": "电子签章", "匹配理由": "支持合同盖章", "引用": "提供电子签名", "document_id": "doc-1"}]
+        visible, citations, dropped = repair_capability_references(matches, refs)
+        self.assertEqual(visible, [])
+        self.assertEqual(citations, [])
+        self.assertEqual(dropped, 1)
+
+    def test_exact_capability_quote_is_preserved(self):
+        refs = [{"document_id": "doc-1", "filename": "产品.md", "excerpt": "支持移动审批和流程配置。"}]
+        matches = [{"能力": "移动审批", "引用": "支持移动审批", "document_id": "doc-1"}]
+        visible, citations, dropped = repair_capability_references(matches, refs)
+        self.assertEqual(visible[0]["引用"], "支持移动审批")
+        self.assertEqual(citations, refs)
+        self.assertEqual(dropped, 0)
 
 
 if __name__ == "__main__":
