@@ -11,7 +11,7 @@ from sqlalchemy.pool import StaticPool
 from app.database import Base, get_db
 from app.main import app
 from app.models import Customer, EntityResolutionCache, OrganizationIdentity
-from app.services.entity_resolution import normalize_name, resolve_entities
+from app.services.entity_resolution import _rank, cache_key, normalize_name, resolve_entities
 
 
 class EntityResolutionServiceTests(unittest.IsolatedAsyncioTestCase):
@@ -66,6 +66,48 @@ class EntityResolutionServiceTests(unittest.IsolatedAsyncioTestCase):
 
     def test_normalize_name_handles_spaces_and_punctuation(self):
         self.assertEqual(normalize_name(" 重庆·西海（智能）装备有限公司 "), "重庆西海智能装备有限公司")
+
+    def test_regional_operator_alias_is_high_confidence_with_authoritative_evidence(self):
+        ranked = _rank({
+            "canonical_name": "中国移动通信集团广东有限公司惠州分公司",
+            "region": "惠州市",
+            "industry": "通信",
+            "evidence": [{"source_type": "政府及法定公示"}],
+        }, "惠州移动", "惠州市", "通信")
+        self.assertGreaterEqual(ranked["score"], 90)
+        self.assertEqual(ranked["confidence"], "high")
+        self.assertIn("运营商地区简称匹配", ranked["match_reasons"])
+
+    async def test_cached_medium_candidate_is_reranked_without_new_search(self):
+        candidate = {
+            "canonical_name": "中国移动通信集团广东有限公司惠州分公司", "entity_type": "企业",
+            "region": "惠州市", "industry": "通信", "official_url": None, "registration_code": None,
+            "evidence": [{"title": "政府公示", "url": "https://www.huizhou.gov.cn/mobile", "excerpt": "主体信息", "source_type": "政府及法定公示"}],
+            "score": 51, "confidence": "medium", "match_reasons": ["地区一致", "行业一致", "存在权威来源"],
+        }
+        with self.session_factory() as db:
+            db.add(EntityResolutionCache(
+                cache_key=cache_key("惠州移动", "惠州市", "通信"), query_name="惠州移动", region="惠州市", industry="通信",
+                candidates=[candidate], expires_at=datetime(2099, 1, 1, tzinfo=timezone.utc),
+            ))
+            db.commit()
+            with patch("app.services.entity_resolution.search_web", new=AsyncMock()) as search:
+                candidates, cache_hit, auto = await resolve_entities(db, "惠州移动", "惠州市", "通信")
+        self.assertTrue(cache_hit)
+        self.assertEqual(search.await_count, 0)
+        self.assertEqual(candidates[0]["confidence"], "high")
+        self.assertEqual(auto, 0)
+
+    async def test_source_backed_low_score_candidate_is_still_returned(self):
+        search_results = [{"title": "政府名单", "url": "https://www.gov.cn/list", "content": "候选主体名单"}]
+        model = SimpleNamespace(data={"candidates": [{
+            "canonical_name": "名称差异较大的候选机构", "entity_type": "其他组织", "region": "异地", "industry": "其他",
+            "official_url": None, "registration_code": None, "evidence_urls": ["https://www.gov.cn/list"],
+        }]}, latency_ms=1, attempts=1)
+        with self.session_factory() as db, patch("app.services.entity_resolution.search_web", new=AsyncMock(return_value=search_results)), patch("app.services.entity_resolution.call_llm", new=AsyncMock(return_value=model)):
+            candidates, _, _ = await resolve_entities(db, "简称", "本地", "通信")
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(candidates[0]["confidence"], "low")
 
 
 class EntityResolutionApiTests(unittest.TestCase):
