@@ -43,10 +43,11 @@ class FlowTests(unittest.IsolatedAsyncioTestCase):
         with test_session() as db:
             saved_task = db.get(GenerationTask, task_id)
             artifact = db.scalar(select(Artifact).where(Artifact.customer_id == customer_id, Artifact.type == ArtifactType.capabilities))
-            self.assertEqual(saved_task.status, "completed")
+            self.assertEqual(saved_task.status, "completed", saved_task.error)
             self.assertEqual(saved_task.progress, 100)
             quote = artifact.content["匹配结果"][0]["引用"]
             self.assertEqual(quote, "系统支持项目进度、投标材料、合同与交付信息的统一管理。")
+            self.assertEqual(artifact.content["匹配结果"][0]["document_id"], document_id)
             self.assertIn(quote, artifact.citations[0]["excerpt"])
 
     async def test_incomplete_model_boundaries_are_restored_before_script_is_saved(self):

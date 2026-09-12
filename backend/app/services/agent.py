@@ -106,7 +106,7 @@ def resolve_capability_references(matches: list[dict], refs: list[dict]) -> tupl
     selected_refs: list[dict] = []
     for raw_match in matches:
         match = dict(raw_match)
-        document_id = str(match.pop("document_id", "") or "")
+        document_id = str(match.get("document_id", "") or "")
         candidates = refs_by_document.get(document_id, [])
         if not candidates:
             raise LLMCallError("能力匹配引用了不存在的内部资料")
@@ -125,6 +125,7 @@ def resolve_capability_references(matches: list[dict], refs: list[dict]) -> tupl
         )
         if reference is None:
             raise LLMCallError("能力匹配的引用无法在内部资料原文中定位")
+        match["document_id"] = document_id
         visible_matches.append(match)
         selected_refs.append(reference)
 
@@ -150,11 +151,12 @@ def repair_capability_references(matches: list[dict], refs: list[dict]) -> tuple
     dropped = 0
     for raw_match in matches:
         match = dict(raw_match)
-        document_id = str(match.pop("document_id", "") or "")
+        document_id = str(match.get("document_id", "") or "")
         quote = str(match.get("引用") or "").strip()
         candidates = refs_by_document.get(document_id, [])
         exact = next((ref for ref in candidates if quote and quote in ref["excerpt"]), None)
         if exact:
+            match["document_id"] = document_id
             visible.append(match)
             selected.append(exact)
             continue
@@ -174,6 +176,7 @@ def repair_capability_references(matches: list[dict], refs: list[dict]) -> tuple
                     best = (score, sentence, ref)
         if best and best[0] >= 0.32:
             match["引用"] = best[1]
+            match["document_id"] = document_id
             visible.append(match)
             selected.append(best[2])
         else:
@@ -513,7 +516,7 @@ def demo_requirements(text: str) -> dict:
 def demo_capabilities(requirements: dict, refs: list[dict]) -> dict:
     if not refs:
         return {"匹配结果": [], "提示": "当前知识库没有足够的内部依据，暂不推荐具体产品或案例。请先上传移动产品、行业方案或案例资料。"}
-    return {"匹配结果": [{"能力": r["filename"], "类别": r["category"], "匹配理由": "资料内容与客户需求关键词相关，可作为方案依据。", "适用条件": "需由方案经理确认产品能力和本地交付条件", "引用": r["excerpt"]} for r in refs[:5]]}
+    return {"匹配结果": [{"能力": r["filename"], "类别": r["category"], "匹配理由": "资料内容与客户需求关键词相关，可作为方案依据。", "适用条件": "需由方案经理确认产品能力和本地交付条件", "引用": r["excerpt"], "document_id": r["document_id"]} for r in refs[:5]]}
 
 
 def demo_solution(customer: Customer, requirements: dict, capabilities: dict) -> dict:

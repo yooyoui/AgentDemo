@@ -16,7 +16,7 @@ from .config import get_settings
 from .database import Base, SessionLocal, engine, get_db
 from .models import Artifact, ArtifactType, Customer, EntityResolutionCache, ExportArtifact, GenerationTask, KnowledgeDocument, OrganizationIdentity, PromptTemplate, WorkspaceOption
 from .schemas import AnalyzeRequest, ArtifactRead, ArtifactUpdate, CustomerCreate, CustomerDeleteRequest, CustomerRead, CustomerSearchResult, KnowledgeRead, ModelTestRead, OrganizationIdentityConfirm, OrganizationIdentityRead, OrganizationResolveRead, OrganizationResolveRequest, PromptRead, PromptUpdate, TaskRead, WebSearchRead, WebSearchRequest, WorkspaceOptionCreate, WorkspaceOptionRead
-from .services.agent import LLMCallError, call_llm, clean_untrusted, demo_capabilities, demo_requirements, demo_script, demo_solution, merge_research_sources, normalize_research_output, preserve_solution_boundaries, public_research, repair_capability_references, retrieve_knowledge
+from .services.agent import LLMCallError, call_llm, clean_untrusted, demo_capabilities, demo_requirements, demo_script, demo_solution, merge_research_sources, normalize_research_output, preserve_solution_boundaries, public_research, repair_capability_references, resolve_capability_references, retrieve_knowledge
 from .services.artifact_edit import ArtifactEditError, prepare_artifact_update
 from .services.documents import ALLOWED_EXTENSIONS, chunk_text, extract_text
 from .services.entity_resolution import normalize_name, resolve_entities
@@ -583,6 +583,9 @@ async def execute_flow(task_id: str, payload: dict):
                     capabilities_result.data.get("匹配结果", []),
                     refs,
                 )
+                # Final defensive assertion: every persisted capability must be
+                # bound to the same document and a verbatim stored excerpt.
+                visible_matches, selected_refs = resolve_capability_references(visible_matches, selected_refs)
                 capabilities = {"匹配结果": visible_matches}
                 notices = [capabilities_result.data.get("提示")] if capabilities_result.data.get("提示") else []
                 if dropped_matches:

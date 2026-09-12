@@ -78,18 +78,37 @@ function RequirementsView({ artifact }: { artifact: Artifact }) {
     <SectionCard title={key} key={key}><BulletList value={content[key]} /></SectionCard>)}</div>;
 }
 
+type CitationMatch = { citation?: Record<string, string>; status: "matched" | "ambiguous" | "missing" };
+
+export function findCapabilityCitation(item: Record<string, unknown>, citations: Array<Record<string, string>>): CitationMatch {
+  const quote = text(item["引用"], "");
+  const documentId = text(item.document_id, "");
+  if (!quote) return { status: "missing" };
+  if (documentId) {
+    const citation = citations.find((entry) => entry.document_id === documentId && entry.excerpt?.includes(quote));
+    return citation ? { citation, status: "matched" } : { status: "missing" };
+  }
+  const exactMatches = citations.filter((entry) => entry.excerpt?.includes(quote));
+  if (!exactMatches.length) return { status: "missing" };
+  if (exactMatches.length === 1) return { citation: exactMatches[0], status: "matched" };
+  const documentIds = new Set(exactMatches.map((entry) => entry.document_id).filter(Boolean));
+  if (documentIds.size === 1 && exactMatches.every((entry) => Boolean(entry.document_id))) return { citation: exactMatches[0], status: "matched" };
+  return { status: "ambiguous" };
+}
+
 function CapabilitiesView({ artifact, onSource }: { artifact: Artifact; onSource: (source: SourceInfo) => void }) {
   const content = record(artifact.content);
   const matches = records(content["匹配结果"]);
   return <div className="artifact-content">
     {matches.length ? <div className="capability-grid">{matches.map((item, index) => {
       const quote = text(item["引用"], "");
-      const citation = artifact.citations.find((entry) => entry.document_id === item.document_id && entry.excerpt?.includes(quote));
+      const evidence = findCapabilityCitation(item, artifact.citations);
+      const citation = evidence.citation;
       return <section className="capability-card" key={`${text(item["能力"])}-${index}`}>
         <div className="card-title-row"><h4>{text(item["能力"], "待确认能力")}</h4><span>{text(item["类别"], "未分类")}</span></div>
         <dl><dt>匹配理由</dt><dd>{text(item["匹配理由"])}</dd><dt>适用条件</dt><dd>{text(item["适用条件"])}</dd></dl>
         <blockquote>{text(item["引用"], "暂无可定位原文")}</blockquote>
-        {citation ? <button className="text-action" onClick={() => onSource({ ...citation, quote })}>查看证据</button> : <p className="evidence-missing">证据无法匹配，请重新生成能力匹配</p>}
+        {citation ? <button className="text-action" onClick={() => onSource({ ...citation, quote })}>查看证据</button> : <p className="evidence-missing">{evidence.status === "ambiguous" ? "引用关联不明确，请重新生成能力匹配" : "引用原文已不存在或资料已删除"}</p>}
       </section>;
     })}</div> : <div className="empty-inline">{text(content["提示"], "当前没有可引用的内部能力依据。")}</div>}
   </div>;

@@ -16,6 +16,10 @@ class AgentTests(unittest.TestCase):
         self.assertEqual(result["匹配结果"], [])
         self.assertIn("不推荐", result["提示"])
 
+    def test_demo_capability_preserves_document_binding(self):
+        result = demo_capabilities({}, [{"document_id": "doc-1", "filename": "产品.md", "category": "产品", "excerpt": "内部原文"}])
+        self.assertEqual(result["匹配结果"][0]["document_id"], "doc-1")
+
     def test_script_has_six_stages_and_safety_boundary(self):
         customer = SimpleNamespace(name="示例单位")
         solution = demo_solution(customer, {"建设期望": ["提效"]}, {"匹配结果": []})
@@ -66,7 +70,7 @@ class AgentTests(unittest.TestCase):
         visible, citations = resolve_capability_references(matches, refs)
 
         self.assertEqual(citations, [refs[0]])
-        self.assertNotIn("document_id", visible[0])
+        self.assertEqual(visible[0]["document_id"], "doc-positioning")
         self.assertIn("document_id", matches[0])
 
     def test_capability_quote_selects_correct_record_when_filenames_repeat(self):
@@ -110,6 +114,7 @@ class AgentTests(unittest.TestCase):
         visible, citations, dropped = repair_capability_references(matches, refs)
         self.assertEqual(dropped, 0)
         self.assertEqual(visible[0]["引用"], "系统支持项目进度、投标材料、合同与交付信息的统一管理。")
+        self.assertEqual(visible[0]["document_id"], "doc-1")
         self.assertIn(visible[0]["引用"], citations[0]["excerpt"])
 
     def test_unlocatable_capability_is_dropped_without_wrong_citation(self):
@@ -125,6 +130,7 @@ class AgentTests(unittest.TestCase):
         matches = [{"能力": "移动审批", "引用": "支持移动审批", "document_id": "doc-1"}]
         visible, citations, dropped = repair_capability_references(matches, refs)
         self.assertEqual(visible[0]["引用"], "支持移动审批")
+        self.assertEqual(visible[0]["document_id"], "doc-1")
         self.assertEqual(citations, refs)
         self.assertEqual(dropped, 0)
 
