@@ -20,6 +20,33 @@ class CustomerRead(CustomerCreate):
     model_config = ConfigDict(from_attributes=True)
 
 
+class CustomerDeleteRequest(BaseModel):
+    confirmation_name: str = Field(min_length=2, max_length=200)
+
+
+class WorkspaceOptionCreate(BaseModel):
+    kind: Literal["visit_type", "customer_role", "style"]
+    label: str = Field(min_length=1, max_length=50)
+
+    @field_validator("label")
+    @classmethod
+    def normalize_label(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("选项名称不能为空")
+        return value
+
+
+class WorkspaceOptionRead(BaseModel):
+    id: str
+    kind: str
+    label: str
+    is_builtin: bool
+    sort_order: int
+    created_at: datetime
+    model_config = ConfigDict(from_attributes=True)
+
+
 class AnalyzeRequest(BaseModel):
     communication: str = Field(default="", max_length=100_000)
     visit_type: str = "首次拜访"

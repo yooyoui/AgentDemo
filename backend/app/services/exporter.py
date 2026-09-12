@@ -63,6 +63,18 @@ def export_docx(path: Path, customer_name: str, artifacts) -> None:
                     cells[0].text = str(fact.get("label", "信息项"))
                     cells[1].text = str(fact.get("value", "待补充"))
                     cells[2].text = str(fact.get("status") or fact.get("confidence") or "待核实")
+                edited = [fact for fact in facts if fact.get("edit_history")]
+                if edited:
+                    doc.add_heading("人工修改记录", level=2)
+                    doc.add_paragraph("以下为原始来源与修改记录，不代表修改后值的当前依据。")
+                    for fact in edited:
+                        for history in fact.get("edit_history", []):
+                            line = f"{fact.get('label', '信息项')}：原值“{history.get('value', '待补充')}”，原状态“{history.get('status', '待确认')}”"
+                            doc.add_paragraph(line, style="List Bullet")
+                            for source in history.get("sources") or []:
+                                doc.add_paragraph(f"原始来源：{source.get('title', '资料')} {source.get('url', '')}")
+                            if history.get("source_url") and not history.get("sources"):
+                                doc.add_paragraph(f"原始来源：{history['source_url']}")
             for key in ("潜在信息化方向", "待补充"):
                 values = artifact.content.get(key, [])
                 if values:
@@ -175,6 +187,16 @@ def export_pdf(path: Path, customer_name: str, artifacts) -> None:
                 ("BOTTOMPADDING", (0, 0), (-1, -1), 3*mm),
             ]))
             elements.append(table)
+            edited = [fact for fact in facts if fact.get("edit_history")]
+            if edited:
+                elements.extend([p("人工修改记录", h3), p("以下为原始来源与修改记录，不代表修改后值的当前依据。", small)])
+                for fact in edited:
+                    for history in fact.get("edit_history", []):
+                        elements.append(p(f"●　{fact.get('label', '信息项')}：原值“{history.get('value', '待补充')}”，原状态“{history.get('status', '待确认')}”", bullet))
+                        for source in history.get("sources") or []:
+                            elements.append(p(f"原始来源：{source.get('title', '资料')} {source.get('url', '')}", small))
+                        if history.get("source_url") and not history.get("sources"):
+                            elements.append(p(f"原始来源：{history['source_url']}", small))
         for key in ("潜在信息化方向", "待补充"):
             if content.get(key):
                 elements.append(p(key, h3))

@@ -2,7 +2,7 @@ import enum
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import Boolean, DateTime, Enum, ForeignKey, Integer, JSON, String, Text
+from sqlalchemy import Boolean, DateTime, Enum, ForeignKey, Integer, JSON, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .database import Base
@@ -91,4 +91,15 @@ class ExportArtifact(Base):
     customer_id: Mapped[str] = mapped_column(ForeignKey("customers.id"), index=True)
     format: Mapped[str] = mapped_column(String(10))
     path: Mapped[str] = mapped_column(String(500))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
+
+
+class WorkspaceOption(Base):
+    __tablename__ = "workspace_options"
+    __table_args__ = (UniqueConstraint("kind", "label", name="uq_workspace_option_kind_label"),)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    kind: Mapped[str] = mapped_column(String(30), index=True)
+    label: Mapped[str] = mapped_column(String(50))
+    is_builtin: Mapped[bool] = mapped_column(Boolean, default=False)
+    sort_order: Mapped[int] = mapped_column(Integer, default=100)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)

@@ -8,14 +8,15 @@ from pathlib import Path
 from fastapi import BackgroundTasks, Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, Response
-from sqlalchemy import select
+from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
 from .config import get_settings
 from .database import Base, SessionLocal, engine, get_db
-from .models import Artifact, ArtifactType, Customer, ExportArtifact, GenerationTask, KnowledgeDocument, PromptTemplate
-from .schemas import AnalyzeRequest, ArtifactRead, ArtifactUpdate, CustomerCreate, CustomerRead, KnowledgeRead, ModelTestRead, PromptRead, PromptUpdate, TaskRead, WebSearchRead, WebSearchRequest
+from .models import Artifact, ArtifactType, Customer, ExportArtifact, GenerationTask, KnowledgeDocument, PromptTemplate, WorkspaceOption
+from .schemas import AnalyzeRequest, ArtifactRead, ArtifactUpdate, CustomerCreate, CustomerDeleteRequest, CustomerRead, KnowledgeRead, ModelTestRead, PromptRead, PromptUpdate, TaskRead, WebSearchRead, WebSearchRequest, WorkspaceOptionCreate, WorkspaceOptionRead
 from .services.agent import LLMCallError, call_llm, clean_untrusted, demo_capabilities, demo_requirements, demo_script, demo_solution, merge_research_sources, normalize_research_output, preserve_solution_boundaries, public_research, resolve_capability_references, retrieve_knowledge
+from .services.artifact_edit import ArtifactEditError, prepare_artifact_update
 from .services.documents import ALLOWED_EXTENSIONS, chunk_text, extract_text
 from .services.exporter import export_docx, export_pdf
 from .services.outputs import CapabilitiesOutput, ConnectionTestOutput, RequirementsOutput, ResearchOutput, SolutionOutput, VisitScriptOutput
@@ -49,6 +50,12 @@ DEFAULT_PROMPTS = {
     "capabilities": "仅依据内部知识库匹配移动产品、服务、方案和案例，没有内部证据时不得推荐。",
     "solution": "形成轻量、分阶段、可落地的初步方案，不生成未经确认的报价、工期或能力承诺。",
     "script": "按开场、背景确认、需求深挖、方案讲解、异议处理、收尾跟进六阶段生成话术。",
+}
+
+DEFAULT_WORKSPACE_OPTIONS = {
+    "visit_type": ["首次拜访", "方案沟通", "高层拜访", "项目跟进"],
+    "customer_role": ["业务负责人", "信息化负责人", "单位领导", "采购负责人"],
+    "style": ["专业务实", "简洁直接", "顾问式沟通"],
 }
 
 OUTPUT_EXAMPLES = {
@@ -113,6 +120,10 @@ def seed_prompts():
         for task_type, content in DEFAULT_PROMPTS.items():
             if not db.scalar(select(PromptTemplate).where(PromptTemplate.task_type == task_type)):
                 db.add(PromptTemplate(task_type=task_type, name=task_type, content=content))
+        for kind, labels in DEFAULT_WORKSPACE_OPTIONS.items():
+            for index, label in enumerate(labels):
+                if not db.scalar(select(WorkspaceOption).where(WorkspaceOption.kind == kind, WorkspaceOption.label == label)):
+                    db.add(WorkspaceOption(kind=kind, label=label, is_builtin=True, sort_order=index))
         db.commit()
 
 
@@ -168,6 +179,75 @@ def get_customer(customer_id: str, db: Session = Depends(get_db)):
     if not customer:
         raise HTTPException(404, "客户不存在")
     return customer
+
+
+@app.delete("/api/customers/{customer_id}", status_code=204)
+def delete_customer(customer_id: str, payload: CustomerDeleteRequest, db: Session = Depends(get_db)):
+    customer = db.get(Customer, customer_id)
+    if not customer:
+        raise HTTPException(404, "客户不存在")
+    if payload.confirmation_name != customer.name:
+        raise HTTPException(409, "输入的客户完整名称不匹配")
+    active_task = db.scalar(
+        select(GenerationTask).where(
+            GenerationTask.customer_id == customer_id,
+            GenerationTask.status.in_(("queued", "running")),
+        )
+    )
+    if active_task:
+        raise HTTPException(409, "客户存在正在执行的任务，暂不能删除")
+    exports = db.scalars(select(ExportArtifact).where(ExportArtifact.customer_id == customer_id)).all()
+    export_root = settings.export_dir.resolve()
+    paths: list[Path] = []
+    for record in exports:
+        path = Path(record.path).resolve()
+        try:
+            path.relative_to(export_root)
+        except ValueError as exc:
+            raise HTTPException(409, "导出文件路径异常，已拒绝删除客户") from exc
+        paths.append(path)
+    for path in paths:
+        try:
+            path.unlink(missing_ok=True)
+        except OSError as exc:
+            raise HTTPException(500, "导出文件删除失败，客户数据未删除") from exc
+    db.execute(delete(ExportArtifact).where(ExportArtifact.customer_id == customer_id))
+    db.execute(delete(GenerationTask).where(GenerationTask.customer_id == customer_id))
+    db.delete(customer)
+    db.commit()
+    return Response(status_code=204)
+
+
+@app.get("/api/workspace-options", response_model=list[WorkspaceOptionRead])
+def list_workspace_options(db: Session = Depends(get_db)):
+    return db.scalars(
+        select(WorkspaceOption).order_by(WorkspaceOption.kind, WorkspaceOption.sort_order, WorkspaceOption.created_at)
+    ).all()
+
+
+@app.post("/api/workspace-options", response_model=WorkspaceOptionRead, status_code=201)
+def create_workspace_option(payload: WorkspaceOptionCreate, db: Session = Depends(get_db)):
+    existing = db.scalars(select(WorkspaceOption).where(WorkspaceOption.kind == payload.kind)).all()
+    if any(item.label.strip().casefold() == payload.label.casefold() for item in existing):
+        raise HTTPException(409, "同类选项名称已存在")
+    max_order = db.scalar(select(func.max(WorkspaceOption.sort_order)).where(WorkspaceOption.kind == payload.kind))
+    option = WorkspaceOption(kind=payload.kind, label=payload.label, sort_order=(max_order or 0) + 1)
+    db.add(option)
+    db.commit()
+    db.refresh(option)
+    return option
+
+
+@app.delete("/api/workspace-options/{option_id}", status_code=204)
+def delete_workspace_option(option_id: str, db: Session = Depends(get_db)):
+    option = db.get(WorkspaceOption, option_id)
+    if not option:
+        raise HTTPException(404, "选项不存在")
+    if option.is_builtin:
+        raise HTTPException(409, "内置默认项不可删除")
+    db.delete(option)
+    db.commit()
+    return Response(status_code=204)
 
 
 @app.get("/api/knowledge", response_model=list[KnowledgeRead])
@@ -534,7 +614,33 @@ def update_artifact(artifact_id: str, payload: ArtifactUpdate, db: Session = Dep
     artifact = db.get(Artifact, artifact_id)
     if not artifact:
         raise HTTPException(404, "成果不存在")
-    artifact.content = payload.content
+    capability_names: set[str] = set()
+    solution_boundaries: list[str] = []
+    capabilities = db.scalar(
+        select(Artifact).where(Artifact.customer_id == artifact.customer_id, Artifact.type == ArtifactType.capabilities)
+    )
+    if capabilities:
+        capability_names = {
+            str(item.get("能力")) for item in capabilities.content.get("匹配结果", [])
+            if isinstance(item, dict) and item.get("能力")
+        }
+    solution = db.scalar(
+        select(Artifact).where(Artifact.customer_id == artifact.customer_id, Artifact.type == ArtifactType.solution)
+    )
+    if solution:
+        solution_boundaries = [
+            str(item) for item in solution.content.get("风险边界", []) if str(item).strip()
+        ]
+    try:
+        artifact.content = prepare_artifact_update(
+            artifact.type.value,
+            artifact.content,
+            payload.content,
+            capability_names=capability_names,
+            solution_boundaries=solution_boundaries,
+        )
+    except ArtifactEditError as exc:
+        raise HTTPException(422, str(exc)) from exc
     artifact.version += 1
     artifact.confirmed = False
     db.commit()

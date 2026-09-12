@@ -11,7 +11,9 @@
 - 能力匹配：仅基于内部知识库匹配产品、云业务、专线、行业方案、服务能力和案例；知识库支持上传、列表和单条删除。
 - 初步方案：生成客户现状、建设目标、方案组合、建设思路、预期价值与风险边界。
 - 拜访话术：覆盖开场破冰、背景确认、需求深挖、方案讲解、异议处理和收尾跟进，并自动保留初步方案的原始风险边界。
-- 人工审核：五项内容逐项确认，编辑后自动恢复为待确认状态。
+- 客户与选项管理：已有客户支持输入完整名称后彻底删除；拜访类型、客户角色和表达风格支持全局共享的自定义选项，内置默认项受保护。
+- 人工审核：五项成果均使用专用卡片展示，并可在模块内进行结构化编辑；保存后版本递增并自动恢复为待确认状态。
+- 引用核验：客户事实与能力匹配可打开引用侧栏，查看网页/文件元数据、原文片段、逐字引用高亮及人工修改历史。
 - 成果导出：全部确认后导出可编辑 Word 和排版后的 PDF，页面与导出文件共用结构化数据，不显示 `label`、`value` 等内部 JSON 字段名。
 - 提示词管理：按任务维护模板、版本和启停状态，启用版本用于后续生成。
 
@@ -72,6 +74,7 @@ AgentDemo/
 │  │  ├─ schemas.py           # API 输入输出结构
 │  │  └─ services/
 │  │     ├─ agent.py          # 大模型调用、知识检索与安全处理
+│  │     ├─ artifact_edit.py  # 五类成果编辑约束与修改审计
 │  │     ├─ search.py         # DeepSeek 原生联网搜索
 │  │     ├─ outputs.py        # 五类模型输出校验
 │  │     ├─ documents.py      # PDF/Word/PPT/Excel 文本提取
@@ -80,6 +83,7 @@ AgentDemo/
 │  └─ requirements.txt
 ├─ frontend/
 │  ├─ app/                    # 页面与样式
+│  ├─ components/             # 成果卡片、结构化编辑器与引用侧栏
 │  ├─ lib/api.ts              # 前端 API 客户端
 │  ├─ package.json
 │  └─ pnpm-lock.yaml
@@ -229,6 +233,9 @@ Invoke-RestMethod -Method Post http://127.0.0.1:8000/api/model/test
 | `POST` | `/api/search` | DeepSeek 原生联网搜索 |
 | `GET/POST` | `/api/customers` | 查询或创建客户 |
 | `GET` | `/api/customers/{id}` | 查询单个客户 |
+| `DELETE` | `/api/customers/{id}` | 输入完整名称后彻底删除客户及关联成果、任务和导出文件 |
+| `GET/POST` | `/api/workspace-options` | 查询或添加全局共享拜访选项 |
+| `DELETE` | `/api/workspace-options/{id}` | 删除自定义选项（内置项不可删除） |
 | `POST` | `/api/customers/{id}/research` | 异步生成或刷新客户摸底 |
 | `GET` | `/api/knowledge` | 查询知识库资料 |
 | `POST` | `/api/knowledge` | 上传并索引内部资料 |
@@ -240,6 +247,10 @@ Invoke-RestMethod -Method Post http://127.0.0.1:8000/api/model/test
 | `GET/PUT` | `/api/artifacts`、`/api/artifacts/{id}` | 查询和修改草稿 |
 | `POST` | `/api/artifacts/{id}/confirm` | 人工确认单项材料 |
 | `POST` | `/api/customers/{id}/export/{docx\|pdf}` | 导出确认后的材料 |
+
+客户删除请求体为 `{"confirmation_name":"客户完整名称"}`。服务端会精确匹配名称；存在排队中或运行中的生成任务时返回 `409`。删除范围包括客户、五类成果、历史任务、导出记录以及导出目录内对应的 Word/PDF 文件；如果记录指向导出目录以外，整个删除操作会被拒绝。
+
+成果编辑由后端按类型校验：客户名称和能力证据不可修改，方案组合只能选择已匹配能力，拜访话术必须保持六阶段顺序并包含方案风险边界。客户事实经人工修改后会清空当前来源，同时保留原值、原状态和原始来源审计；页面与导出文件会将其标为“已补充”“核实后修改”或“用户修改”。
 
 知识库支持 `.pdf`、`.docx`、`.pptx`、`.xlsx`、`.txt` 和 `.md`，单文件默认不超过 15 MB。删除前页面会二次确认；删除成功后，数据库记录和知识库存储目录中的对应文件会一并移除，该资料不再参与后续能力匹配。后端会拒绝删除知识库存储目录之外的路径。
 

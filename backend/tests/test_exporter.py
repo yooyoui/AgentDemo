@@ -23,6 +23,11 @@ class ExporterTests(unittest.TestCase):
                     "status": "已核实",
                     "source_url": "https://example.com",
                     "sources": [{"title": "公开来源", "url": "https://example.com"}],
+                    "edit_history": [{
+                        "value": "待补充",
+                        "status": "待补充",
+                        "sources": [{"title": "原始网页", "url": "https://old.example.com"}],
+                    }],
                 }],
                 "潜在信息化方向": ["云网升级"],
                 "待补充": ["企业规模"],
@@ -42,6 +47,8 @@ class ExporterTests(unittest.TestCase):
         self.assertIn("企业性质", visible)
         self.assertIn("国有企业", visible)
         self.assertIn("已核实", visible)
+        self.assertIn("原始来源与修改记录，不代表修改后值的当前依据", visible)
+        self.assertIn("原始网页", visible)
         for internal_key in ("enterprise_nature", "source_url", "sources", "label", "value"):
             self.assertNotIn(internal_key, visible)
 

@@ -18,6 +18,7 @@ node_modules/
 out/
 .npm-cache/
 *.log
+*.tsbuildinfo
 
 # Runtime data and generated artifacts
 /data/

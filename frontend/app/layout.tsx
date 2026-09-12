@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import "./globals.css";
+import "./feature.css";
 
 export const metadata: Metadata = {
   title: "政企拜访助手",

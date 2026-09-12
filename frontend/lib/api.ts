@@ -7,6 +7,7 @@ export type Knowledge = { id: string; filename: string; category: string; versio
 export type Prompt = { id: string; task_type: string; name: string; content: string; version: string; enabled: boolean; updated_at: string };
 export type Health = { status: string; provider: "deepseek" | "demo"; model: string; model_status: "configured" | "demo"; research: string; research_model?: string };
 export type ModelTest = { status: "ok" | "failed" | "demo"; provider: string; model: string; latency_ms: number | null; error: string };
+export type WorkspaceOption = { id: string; kind: "visit_type" | "customer_role" | "style"; label: string; is_builtin: boolean; sort_order: number; created_at: string };
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`${API_URL}${path}`, init);
@@ -23,6 +24,10 @@ export const api = {
   testModel: () => request<ModelTest>("/model/test", { method: "POST" }),
   customers: () => request<Customer[]>("/customers"),
   createCustomer: (body: Omit<Customer, "id" | "created_at">) => request<Customer>("/customers", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }),
+  deleteCustomer: (id: string, confirmationName: string) => request<void>(`/customers/${id}`, { method: "DELETE", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ confirmation_name: confirmationName }) }),
+  workspaceOptions: () => request<WorkspaceOption[]>("/workspace-options"),
+  createWorkspaceOption: (body: Pick<WorkspaceOption, "kind" | "label">) => request<WorkspaceOption>("/workspace-options", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }),
+  deleteWorkspaceOption: (id: string) => request<void>(`/workspace-options/${id}`, { method: "DELETE" }),
   runResearch: (id: string) => request<Task>(`/customers/${id}/research`, { method: "POST" }),
   runAll: (id: string, body: object) => request<Task>(`/customers/${id}/run-all`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }),
   task: (id: string) => request<Task>(`/tasks/${id}`),
