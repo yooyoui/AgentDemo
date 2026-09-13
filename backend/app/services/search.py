@@ -142,19 +142,24 @@ async def _request_deepseek_search(client: httpx.AsyncClient, request: dict, max
 
 
 async def _request_tavily_search(client: httpx.AsyncClient, query: str, max_results: int) -> SearchResults:
+    request_body = {
+        "query": query,
+        "topic": "general",
+        "search_depth": settings.tavily_search_depth,
+        "max_results": max_results,
+        "include_answer": False,
+        "include_raw_content": False,
+    }
+    # Tavily rejects country filtering for its fast and ultra-fast modes.
+    # Keep the low-latency mode usable and rely on the Chinese query itself
+    # for geographic relevance.
+    if settings.tavily_search_depth not in {"fast", "ultra-fast"}:
+        request_body["country"] = "china"
     try:
         response = await client.post(
             f"{settings.tavily_base_url.rstrip('/')}/search",
             headers={"Authorization": f"Bearer {settings.tavily_api_key}"},
-            json={
-                "query": query,
-                "topic": "general",
-                "search_depth": settings.tavily_search_depth,
-                "max_results": max_results,
-                "country": "china",
-                "include_answer": False,
-                "include_raw_content": False,
-            },
+            json=request_body,
             timeout=settings.tavily_timeout_seconds,
         )
     except httpx.TimeoutException as exc:
@@ -241,7 +246,16 @@ async def search_web(query: str, max_results: int = 5, client: httpx.AsyncClient
             if not settings.tavily_fallback_to_deepseek:
                 raise tavily_error
         if settings.llm_api_key:
-            return await _search_deepseek(client, query, max_results)
+            try:
+                return await _search_deepseek(client, query, max_results)
+            except WebSearchError as deepseek_error:
+                if tavily_error:
+                    raise WebSearchError(
+                        f"{tavily_error}；DeepSeek 兜底失败：{deepseek_error}",
+                        deepseek_error.status_code,
+                        deepseek_error.retryable,
+                    ) from deepseek_error
+                raise
         if tavily_error:
             raise WebSearchError(f"{tavily_error}；DeepSeek 兜底未配置", tavily_error.status_code)
         raise WebSearchError("联网搜索服务未配置", 503)

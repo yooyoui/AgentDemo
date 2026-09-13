@@ -119,8 +119,19 @@ class SearchServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sent["headers"]["Authorization"], "Bearer test-tavily-key")
         self.assertEqual(sent["json"]["query"], "示例企业")
         self.assertEqual(sent["json"]["search_depth"], "fast")
-        self.assertEqual(sent["json"]["country"], "china")
+        self.assertNotIn("country", sent["json"])
         self.assertFalse(sent["json"]["include_raw_content"])
+
+    async def test_tavily_non_fast_search_keeps_country_filter(self):
+        settings.tavily_api_key = "test-tavily-key"
+        settings.tavily_search_depth = "advanced"
+        client = FakeClient(response(200, {"results": [
+            {"title": "公开信息", "url": "https://example.com", "content": "摘要"}
+        ]}))
+
+        await search_web("示例企业", client=client)
+
+        self.assertEqual(client.calls[0][1]["json"]["country"], "china")
 
     async def test_tavily_failure_falls_back_to_deepseek_pro(self):
         settings.tavily_api_key = "test-tavily-key"
@@ -136,6 +147,19 @@ class SearchServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(client.calls), 2)
         self.assertEqual(client.calls[0][0], "https://api.tavily.com/search")
         self.assertEqual(client.calls[1][0], "https://api.deepseek.com/responses")
+
+    async def test_both_provider_errors_are_preserved(self):
+        settings.tavily_api_key = "test-tavily-key"
+        client = FakeClient([
+            response(400, {}),
+            response(200, {"status": "completed", "output": [
+                {"type": "web_search_call", "status": "completed"},
+                {"type": "message", "content": [{"type": "output_text", "text": "not-json"}]},
+            ]}),
+        ])
+
+        with self.assertRaisesRegex(WebSearchError, "Tavily.*DeepSeek 兜底失败"):
+            await search_web("示例查询", client=client)
 
     async def test_empty_tavily_results_fall_back_without_business_requery(self):
         settings.tavily_api_key = "test-tavily-key"

@@ -26,8 +26,8 @@ function BulletList({ value }: { value: unknown }) {
   return items.length ? <ul className="clean-list">{items.map((item, index) => <li key={`${item}-${index}`}>{item}</li>)}</ul> : <p className="muted-copy">暂无内容</p>;
 }
 
-function SectionCard({ title, children, wide = false }: { title: string; children: React.ReactNode; wide?: boolean }) {
-  return <section className={wide ? "content-card span-all" : "content-card"}><h4>{title}</h4>{children}</section>;
+function SectionCard({ title, children, wide = false, tone = "" }: { title: string; children: React.ReactNode; wide?: boolean; tone?: string }) {
+  return <section className={`content-card${wide ? " span-all" : ""}${tone ? ` ${tone}` : ""}`}><h4>{title}</h4>{children}</section>;
 }
 
 function sourceFromFact(fact: Record<string, unknown>): SourceInfo | null {
@@ -118,7 +118,7 @@ function SolutionView({ artifact }: { artifact: Artifact }) {
   const content = record(artifact.content);
   return <div className="artifact-content section-grid">
     <SectionCard title="客户现状" wide><p>{text(content["客户现状"])}</p></SectionCard>
-    {["建设目标", "方案组合", "建设思路", "预期价值", "风险边界"].map((key) => <SectionCard title={key} key={key}><BulletList value={content[key]} /></SectionCard>)}
+    {["建设目标", "方案组合", "建设思路", "预期价值", "风险边界"].map((key) => <SectionCard title={key} tone={key === "风险边界" ? "risk-card" : ""} key={key}><BulletList value={content[key]} /></SectionCard>)}
   </div>;
 }
 
@@ -133,7 +133,7 @@ function ScriptView({ artifact }: { artifact: Artifact }) {
       <strong>目标</strong><p>{text(stage["目标"])}</p><strong>推荐表达</strong><p>{text(stage["推荐表达"])}</p>
       {strings(stage["问题"]).length > 0 && <><strong>建议问题</strong><BulletList value={stage["问题"]} /></>}
     </section>)}</div>
-    <SectionCard title="风险与禁止承诺" wide><BulletList value={content["禁止承诺"]} /></SectionCard>
+    <SectionCard title="风险与禁止承诺" wide tone="risk-card"><BulletList value={content["禁止承诺"]} /></SectionCard>
   </div>;
 }
 
