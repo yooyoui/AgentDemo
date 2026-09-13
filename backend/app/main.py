@@ -227,7 +227,13 @@ def search_customers(q: str = Query(min_length=1, max_length=200), limit: int = 
 @app.post("/api/v1/organization-identities/resolve", response_model=OrganizationResolveRead)
 async def resolve_organization(payload: OrganizationResolveRequest, db: Session = Depends(get_db)):
     try:
-        candidates, cache_hit, auto_selected = await resolve_entities(db, payload.name, payload.region, payload.industry)
+        candidates, cache_hit, auto_selected = await resolve_entities(
+            db,
+            payload.name,
+            payload.region,
+            payload.industry,
+            force_refresh=payload.force_refresh,
+        )
     except WebSearchError as exc:
         raise HTTPException(exc.status_code, str(exc)) from exc
     except LLMCallError as exc:

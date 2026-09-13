@@ -58,6 +58,7 @@ class OrganizationResolveRequest(BaseModel):
     name: str = Field(min_length=2, max_length=200)
     region: str = Field(default="", max_length=100)
     industry: str = Field(default="", max_length=100)
+    force_refresh: bool = False
 
     @field_validator("name", "region", "industry")
     @classmethod
