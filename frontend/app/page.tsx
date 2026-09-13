@@ -185,7 +185,12 @@ export default function Home() {
     if (!source?.name.trim()) return setError("请先填写客户单位名称");
     setResolutionTarget(target); setResolutionEntered(source.name.trim()); setCandidates([]); setResolutionBusy(true); setError("");
     try {
-      const result = await api.resolveOrganization({ name: source.name.trim(), region: source.region || "", industry: source.industry || "" });
+      const result = await api.resolveOrganization({
+        name: source.name.trim(),
+        region: source.region || "",
+        industry: source.industry || "",
+        force_refresh: target === "selected",
+      });
       setCandidates(result.candidates);
     } catch (e) { setError(e instanceof Error ? `${e.message}；仍可明确沿用输入名称` : "主体识别失败"); }
     finally { setResolutionBusy(false); }

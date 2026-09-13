@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 from ..models import EntityResolutionCache
 from .agent import call_llm, prepare_research_results
 from .outputs import EntityResolutionOutput
-from .search import search_web
+from .search import search_web, settings
 
 
 ENTITY_EXAMPLE = {
@@ -31,7 +31,16 @@ def normalize_name(value: str) -> str:
 
 
 def cache_key(name: str, region: str, industry: str) -> str:
-    raw = "|".join((normalize_name(name), normalize_name(region), normalize_name(industry)))
+    provider = "tavily" if settings.tavily_api_key else "deepseek"
+    search_profile = settings.tavily_search_depth if settings.tavily_api_key else settings.llm_search_model
+    raw = "|".join((
+        "entity-resolution-v3",
+        provider,
+        search_profile,
+        normalize_name(name),
+        normalize_name(region),
+        normalize_name(industry),
+    ))
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
@@ -87,10 +96,22 @@ def _rank(candidate: dict, query_name: str, region: str, industry: str) -> dict:
     return {**candidate, "score": score, "confidence": confidence, "match_reasons": reasons or ["公开信息弱匹配"]}
 
 
-async def resolve_entities(db: Session, name: str, region: str, industry: str) -> tuple[list[dict], bool, int | None]:
+async def resolve_entities(
+    db: Session,
+    name: str,
+    region: str,
+    industry: str,
+    *,
+    force_refresh: bool = False,
+) -> tuple[list[dict], bool, int | None]:
     key = cache_key(name, region, industry)
     now = datetime.now(timezone.utc)
-    cached = db.scalar(select(EntityResolutionCache).where(EntityResolutionCache.cache_key == key, EntityResolutionCache.expires_at > now))
+    cached = None if force_refresh else db.scalar(
+        select(EntityResolutionCache).where(
+            EntityResolutionCache.cache_key == key,
+            EntityResolutionCache.expires_at > now,
+        )
+    )
     if cached:
         # Ranking rules evolve independently from the expensive search result.
         # Re-rank cached evidence locally so fixes take effect without another web call.
@@ -103,11 +124,17 @@ async def resolve_entities(db: Session, name: str, region: str, industry: str) -
         auto = 0 if len(candidates) == 1 and candidates[0].get("confidence") == "high" else None
         return candidates, True, auto
 
-    query = (
-        f"识别组织主体：名称或简称“{name}”，地区“{region or '未知'}”，行业“{industry or '未知'}”。"
-        "一次性查找可能的企业、政府、学校、医院或其他组织主体，重点核对法定全称、地区、行业、官网和统一社会信用代码。"
-        "优先政府公示、法定披露与组织官网；只要存在直接证据，即使名称只是简称或置信度不足也保留，最多返回3个候选。"
-    )
+    # Search engines rank concise entity keywords more reliably than a long
+    # natural-language instruction, which can retrieve generic registration
+    # guidance instead of the organization itself.
+    query = " ".join(filter(None, (
+        f'"{name}"',
+        region,
+        industry,
+        "法定全称",
+        "官网",
+        "统一社会信用代码",
+    )))
     results = prepare_research_results(await search_web(query, max_results=8), 8)
     sources = [{
         "title": item["title"],
@@ -149,10 +176,11 @@ async def resolve_entities(db: Session, name: str, region: str, industry: str) -
     candidates.sort(key=lambda item: (-item["score"], item["canonical_name"]))
     candidates = candidates[:3]
     stale = db.scalar(select(EntityResolutionCache).where(EntityResolutionCache.cache_key == key))
+    cache_ttl = timedelta(days=7) if any(item["confidence"] == "high" for item in candidates) else timedelta(minutes=30)
     if stale:
-        stale.candidates, stale.created_at, stale.expires_at = candidates, now, now + timedelta(days=7)
+        stale.candidates, stale.created_at, stale.expires_at = candidates, now, now + cache_ttl
     else:
-        db.add(EntityResolutionCache(cache_key=key, query_name=name, region=region, industry=industry, candidates=candidates, expires_at=now + timedelta(days=7)))
+        db.add(EntityResolutionCache(cache_key=key, query_name=name, region=region, industry=industry, candidates=candidates, expires_at=now + cache_ttl))
     db.commit()
     auto = 0 if len(candidates) == 1 and candidates[0]["confidence"] == "high" else None
     return candidates, False, auto

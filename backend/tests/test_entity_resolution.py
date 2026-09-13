@@ -1,10 +1,10 @@
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, select
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
@@ -43,6 +43,10 @@ class EntityResolutionServiceTests(unittest.IsolatedAsyncioTestCase):
                 first, cache_hit, _ = await resolve_entities(db, "重庆西海智能装备", "重庆", "智能装备")
                 second, second_hit, _ = await resolve_entities(db, "重庆西海智能装备", "重庆", "智能装备")
             self.assertEqual(search.await_count, 1)
+            query = search.await_args.args[0]
+            self.assertIn('"重庆西海智能装备"', query)
+            self.assertIn("法定全称", query)
+            self.assertNotIn("一次性查找", query)
             self.assertEqual(llm.await_count, 1)
             self.assertFalse(cache_hit)
             self.assertTrue(second_hit)
@@ -97,6 +101,51 @@ class EntityResolutionServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(search.await_count, 0)
         self.assertEqual(candidates[0]["confidence"], "high")
         self.assertEqual(auto, 0)
+
+    async def test_force_refresh_bypasses_and_replaces_cached_candidates(self):
+        cached_candidate = {
+            "canonical_name": "错误候选有限公司", "entity_type": "企业",
+            "region": "苏州市", "industry": "通信", "official_url": None, "registration_code": None,
+            "evidence": [{"title": "旧来源", "url": "https://example.com/old", "excerpt": "旧内容", "source_type": "其他公开来源"}],
+            "score": 50, "confidence": "medium", "match_reasons": ["公开信息弱匹配"],
+        }
+        search_results = [{"title": "中国移动公示", "url": "https://www.10086.cn/suzhou", "content": "中国移动通信集团江苏有限公司苏州分公司"}]
+        model = SimpleNamespace(data={"candidates": [{
+            "canonical_name": "中国移动通信集团江苏有限公司苏州分公司", "entity_type": "企业",
+            "region": "苏州市", "industry": "通信", "official_url": "https://www.10086.cn/suzhou",
+            "registration_code": None, "evidence_urls": ["https://www.10086.cn/suzhou"],
+        }]}, latency_ms=1, attempts=1)
+        with self.session_factory() as db:
+            db.add(EntityResolutionCache(
+                cache_key=cache_key("苏州移动", "苏州", "通信"), query_name="苏州移动", region="苏州", industry="通信",
+                candidates=[cached_candidate], expires_at=datetime(2099, 1, 1, tzinfo=timezone.utc),
+            ))
+            db.commit()
+            with (
+                patch("app.services.entity_resolution.search_web", new=AsyncMock(return_value=search_results)) as search,
+                patch("app.services.entity_resolution.call_llm", new=AsyncMock(return_value=model)),
+            ):
+                candidates, cache_hit, _ = await resolve_entities(
+                    db, "苏州移动", "苏州", "通信", force_refresh=True
+                )
+            stored = db.scalar(select(EntityResolutionCache))
+        self.assertFalse(cache_hit)
+        self.assertEqual(search.await_count, 1)
+        self.assertEqual(candidates[0]["canonical_name"], "中国移动通信集团江苏有限公司苏州分公司")
+        self.assertEqual(stored.candidates[0]["canonical_name"], candidates[0]["canonical_name"])
+
+    async def test_non_high_confidence_cache_expires_quickly(self):
+        search_results = [{"title": "普通来源", "url": "https://example.com/list", "content": "可能主体"}]
+        model = SimpleNamespace(data={"candidates": [{
+            "canonical_name": "名称差异较大的候选机构", "entity_type": "其他组织",
+            "region": "异地", "industry": "其他", "official_url": None,
+            "registration_code": None, "evidence_urls": ["https://example.com/list"],
+        }]}, latency_ms=1, attempts=1)
+        with self.session_factory() as db, patch("app.services.entity_resolution.search_web", new=AsyncMock(return_value=search_results)), patch("app.services.entity_resolution.call_llm", new=AsyncMock(return_value=model)):
+            await resolve_entities(db, "简称", "本地", "通信")
+            stored = db.scalar(select(EntityResolutionCache))
+            ttl = stored.expires_at.replace(tzinfo=timezone.utc) - stored.created_at.replace(tzinfo=timezone.utc)
+        self.assertLessEqual(ttl, timedelta(minutes=31))
 
     async def test_source_backed_low_score_candidate_is_still_returned(self):
         search_results = [{"title": "政府名单", "url": "https://www.gov.cn/list", "content": "候选主体名单"}]
